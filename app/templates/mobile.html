@@ -453,9 +453,6 @@ async function pollOutput() {
         const data = await res.json();
         const raw = data.output || '';
         if (raw !== lastOutput) {
-            // Auto-voice: process new content
-            if (autoVoice) processAutoVoice(raw);
-
             lastOutput = raw;
             let html = ansiToHtml(raw);
             // Replace 🔊 lines with TTS play buttons
@@ -695,6 +692,7 @@ async function sendInput() {
     inputEl.style.height = 'auto';
     document.getElementById('inputWrap').classList.remove('has-voice');
     autoScroll = true;
+    voiceCooldown(); // don't voice user's own message echo
 
     await fetch(`${API}/sessions/${currentSession}/send`, {
         method: 'POST',
@@ -843,27 +841,67 @@ let currentAudio = null;
 let currentTTSBtn = null;
 let autoVoice = localStorage.getItem('autoVoice') === 'true';
 let lastVoicedOutput = '';
+let voiceCooldownUntil = 0;  // timestamp: don't voice until this time (skip user echo)
+let pendingVoiceBuffer = ''; // accumulates text until sentence boundary
 let ttsQueue = [];
 let ttsPlaying = false;
+let voicePollTimer = null;
 
-// Init toggle state
-if (autoVoice) document.getElementById('voiceToggle').classList.add('on');
+// Init toggle state on DOM ready
+setTimeout(() => {
+    if (autoVoice) {
+        document.getElementById('voiceToggle').classList.add('on');
+        startVoicePolling();
+    }
+}, 0);
 
 function toggleAutoVoice() {
     autoVoice = !autoVoice;
     localStorage.setItem('autoVoice', autoVoice);
     document.getElementById('voiceToggle').classList.toggle('on', autoVoice);
     if (autoVoice) {
-        // Reset baseline so we don't voice old output
         lastVoicedOutput = lastOutput;
+        pendingVoiceBuffer = '';
+        startVoicePolling();
     } else {
-        // Stop any playing audio
+        stopVoicePolling();
         ttsQueue = [];
+        pendingVoiceBuffer = '';
         if (currentAudio) { currentAudio.pause(); currentAudio = null; }
     }
 }
 
-// Strip ANSI codes from raw text
+function startVoicePolling() {
+    stopVoicePolling();
+    voicePollTimer = setInterval(voicePoll, 800);
+}
+function stopVoicePolling() {
+    if (voicePollTimer) { clearInterval(voicePollTimer); voicePollTimer = null; }
+}
+
+// Separate fast poll just for voice — reads terminal independently
+async function voicePoll() {
+    if (!autoVoice || !currentSession) return;
+    if (Date.now() < voiceCooldownUntil) return; // skip during cooldown after user send
+
+    try {
+        const res = await fetch(`${API}/sessions/${currentSession}/tail?full=true`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const raw = data.output || '';
+        if (raw === lastVoicedOutput) return;
+        processAutoVoice(raw);
+    } catch {}
+}
+
+// Mark cooldown when user sends a message (skip echo)
+function voiceCooldown() {
+    voiceCooldownUntil = Date.now() + 3000;
+    lastVoicedOutput = lastOutput;
+    pendingVoiceBuffer = '';
+}
+
+// Strip ANSI codes
 function stripAnsi(text) {
     return text
         .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
@@ -871,44 +909,108 @@ function stripAnsi(text) {
         .replace(/\x1b[^\x1b]{0,8}/g, '');
 }
 
-// Filter lines: keep meaningful natural language, skip code/noise
-function extractVoiceableText(raw) {
-    const clean = stripAnsi(raw);
-    const lines = clean.split('\n');
-    const meaningful = [];
+// Is this line natural human speech (not code/commands/noise)?
+function isVoiceable(line) {
+    const t = line.trim();
+    if (!t || t.length < 8) return false;
+    // Skip code patterns
+    if (/^\s{4,}\S/.test(line)) return false;                    // indented code
+    if (/^[{}\[\]<>\/\\|`~#$%^&*+=;:()]/.test(t)) return false;  // starts with code chars
+    if (/^(import |from |def |class |const |let |var |function |async |await |return |if \(|else |for |while |try |catch |export |module)/.test(t)) return false;
+    if (/^\d+[→│|:\t]/.test(t)) return false;                    // line numbers
+    if (/^[─━═╔╗╚╝├┤┬┴┼┌┐└┘│╭╮╰╯]/.test(t)) return false;      // box drawing
+    if (/^(INFO|WARNING|ERROR|DEBUG|HTTP|GET |POST |PUT |DELETE )/.test(t)) return false;
+    if (/^[-*+] \[[ x]\]/.test(t)) return false;                 // checkboxes
+    if (/^(```|---)/.test(t)) return false;                       // markdown fences
+    if (/^\$ /.test(t)) return false;                              // shell commands
+    if (/^[a-zA-Z_\/][a-zA-Z0-9_\/.]*\.(py|js|ts|html|css|json|sh|md|yml|yaml|toml|txt|log|cfg|ini|env)/.test(t)) return false; // file paths
+    if (/^(curl |cd |ls |cat |grep |git |npm |pip |docker |tmux |pm2 )/.test(t)) return false; // commands
+    // Must contain actual words (Cyrillic or Latin)
+    const wordCount = (t.match(/[а-яА-ЯёЁa-zA-Z]{2,}/g) || []).length;
+    return wordCount >= 2;
+}
 
+// Extract new voiceable text from raw terminal diff
+function processAutoVoice(raw) {
+    if (!autoVoice || !raw) return;
+
+    // Find what's new since last voiced
+    let newPart = '';
+    if (lastVoicedOutput && raw.length > lastVoicedOutput.length) {
+        // Find common prefix length
+        let i = 0;
+        const minLen = Math.min(lastVoicedOutput.length, raw.length);
+        while (i < minLen && lastVoicedOutput[i] === raw[i]) i++;
+        newPart = raw.substring(i);
+    } else if (!lastVoicedOutput) {
+        // First run — don't voice everything, just set baseline
+        lastVoicedOutput = raw;
+        return;
+    } else {
+        // Output shortened (terminal scrollback trimmed) — just update baseline
+        lastVoicedOutput = raw;
+        return;
+    }
+    lastVoicedOutput = raw;
+
+    if (!newPart || newPart.length < 5) return;
+
+    // Clean and split into lines
+    const clean = stripAnsi(newPart);
+    const lines = clean.split('\n');
+
+    // Collect voiceable lines
+    const voiceable = [];
     for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        // Skip common noise patterns
-        if (trimmed.length < 5) continue;
-        if (/^[\s]*[{}\[\]<>\/\\|`~#$%^&*+=;]/.test(trimmed)) continue;  // code-like
-        if (/^(import |from |def |class |const |let |var |function |async |await |return |if |else |for |while )/.test(trimmed)) continue;
-        if (/^\d+[→│|]/.test(trimmed)) continue;  // line numbers
-        if (/^[─━═╔╗╚╝├┤┬┴┼]/.test(trimmed)) continue;  // box drawing
-        if (/^(INFO:|WARNING:|ERROR:|DEBUG:|\[)/.test(trimmed)) continue;  // logs
-        if (/^\s{4,}/.test(line)) continue;  // indented code
-        if (/^[-*] \[/.test(trimmed)) continue;  // markdown task lists
-        if (/\.(py|js|ts|html|css|json|sh|md|yml|yaml|toml)[:( ]/.test(trimmed)) continue;  // file refs in tool output
-        // Keep lines that look like natural language
-        if (/[а-яА-ЯёЁa-zA-Z]{3,}/.test(trimmed) && trimmed.length > 10) {
-            meaningful.push(trimmed);
+        if (isVoiceable(line)) {
+            voiceable.push(line.trim());
         }
     }
-    return meaningful.join('. ');
+
+    if (voiceable.length === 0) return;
+
+    // Add to pending buffer
+    pendingVoiceBuffer += (pendingVoiceBuffer ? ' ' : '') + voiceable.join('. ');
+
+    // Flush complete sentences from buffer
+    flushVoiceBuffer(false);
+}
+
+function flushVoiceBuffer(force) {
+    if (!pendingVoiceBuffer) return;
+
+    // Find last sentence boundary (. ! ? or end of paragraph)
+    const sentenceEnd = pendingVoiceBuffer.search(/[.!?:]\s+(?=[А-ЯA-Z🔊])/);
+
+    if (sentenceEnd >= 0) {
+        // Voice everything up to and including the sentence end
+        const toVoice = pendingVoiceBuffer.substring(0, sentenceEnd + 1).trim();
+        pendingVoiceBuffer = pendingVoiceBuffer.substring(sentenceEnd + 2).trim();
+        if (toVoice.length >= 10) queueTTS(toVoice);
+    } else if (force && pendingVoiceBuffer.length >= 10) {
+        // Force flush remaining
+        queueTTS(pendingVoiceBuffer.trim());
+        pendingVoiceBuffer = '';
+    } else if (pendingVoiceBuffer.length > 300) {
+        // Buffer too long without sentence boundary — flush as-is
+        queueTTS(pendingVoiceBuffer.trim());
+        pendingVoiceBuffer = '';
+    }
 }
 
 // Queue TTS and play sequentially
-async function queueTTS(text) {
+function queueTTS(text) {
     if (!text || text.length < 10) return;
-    // Limit text length for TTS
-    const limited = text.length > 500 ? text.substring(0, 500) + '...' : text;
+    const limited = text.length > 600 ? text.substring(0, 600) : text;
     ttsQueue.push(limited);
     if (!ttsPlaying) playNextTTS();
 }
 
 async function playNextTTS() {
-    if (ttsQueue.length === 0) { ttsPlaying = false; return; }
+    if (ttsQueue.length === 0) {
+        ttsPlaying = false;
+        return;
+    }
     ttsPlaying = true;
     const text = ttsQueue.shift();
 
@@ -925,33 +1027,9 @@ async function playNextTTS() {
         currentAudio = new Audio(data.url);
         currentAudio.onended = () => { currentAudio = null; playNextTTS(); };
         currentAudio.onerror = () => { currentAudio = null; playNextTTS(); };
-        currentAudio.play();
+        await currentAudio.play().catch(() => { currentAudio = null; playNextTTS(); });
     } catch {
         playNextTTS();
-    }
-}
-
-// Called from pollOutput when new content detected & autoVoice is on
-function processAutoVoice(raw) {
-    if (!autoVoice || !raw) return;
-
-    // Find what's new
-    let newPart = raw;
-    if (lastVoicedOutput && raw.startsWith(lastVoicedOutput)) {
-        newPart = raw.substring(lastVoicedOutput.length);
-    } else if (lastVoicedOutput) {
-        // Output changed substantially — find common prefix
-        let i = 0;
-        while (i < lastVoicedOutput.length && i < raw.length && lastVoicedOutput[i] === raw[i]) i++;
-        newPart = raw.substring(i);
-    }
-    lastVoicedOutput = raw;
-
-    if (!newPart || newPart.length < 20) return;
-
-    const voiceable = extractVoiceableText(newPart);
-    if (voiceable && voiceable.length > 15) {
-        queueTTS(voiceable);
     }
 }
 
