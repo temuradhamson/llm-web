@@ -179,7 +179,9 @@ def main():
 
     print(f"[NARRATOR] Starting for session '{SESSION_ID}'")
 
-    # Set baseline
+    # Stabilize baseline: read twice with a pause to get consistent output
+    last_output = get_session_output()
+    time.sleep(1)
     last_output = get_session_output()
     last_narrate_time = time.time()
 
@@ -190,8 +192,7 @@ def main():
         if not current or current == last_output:
             continue
 
-        # Find new content
-        # Simple: find common prefix
+        # Find new content via common prefix
         i = 0
         min_len = min(len(last_output), len(current))
         while i < min_len and last_output[i] == current[i]:
@@ -201,6 +202,16 @@ def main():
 
         if len(new_part) < MIN_NEW_TEXT:
             continue
+
+        # If diff is huge (>2000 chars), it's likely a scrollback dump after restart.
+        # Only take the last ~500 chars (the actually new part).
+        if len(new_part) > 2000:
+            # Find a newline boundary near the end
+            tail = new_part[-500:]
+            nl = tail.find('\n')
+            new_part = tail[nl + 1:] if nl >= 0 else tail
+            if len(new_part) < MIN_NEW_TEXT:
+                continue
 
         # Check cooldown
         now = time.time()
