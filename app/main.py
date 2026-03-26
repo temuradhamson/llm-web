@@ -766,42 +766,73 @@ async def tts(payload: TTSRequest):
     return {"ok": True, "url": data.get("url", "")}
 
 
-# --- Narrator (server-side sub-agent) ---
+# --- Narrator (hook-driven TTS) ---
+#
+# Flow: Claude Stop hook → POST /narrator/hook (with assistant text)
+#       → summarize text → TTS API → queue audio blob
+#       → frontend polls /narrator/{session}/next → plays WAV
+#
+# No more tmux polling or Claude Haiku subprocess.
 
-# In-memory state: session_id -> {"enabled": bool, "queue": [audio_urls], "pid": int|None}
+# In-memory state: session_id -> {"enabled": bool, "queue": [bytes]}
 NARRATOR_STATE: dict[str, dict] = {}
-NARRATOR_SCRIPT = Path(__file__).parent.parent / "narrator.py"
+
+
+def _narrator_summarize(text: str) -> str:
+    """Create a brief spoken summary from assistant response text.
+
+    Strips code blocks, tool output, and keeps only human-readable parts.
+    Returns text suitable for TTS (1-3 sentences).
+    """
+    # Remove code blocks
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Remove inline code
+    text = re.sub(r'`[^`]+`', '', text)
+    # Remove markdown headers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Remove bold/italic
+    text = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', text)
+    # Remove file paths
+    text = re.sub(r'[/~][\w./\-]+\.\w+', '', text)
+    # Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
+    # Remove lines that look like code or tool output
+    lines = text.split('\n')
+    good = []
+    for line in lines:
+        s = line.strip()
+        if not s or len(s) < 10:
+            continue
+        # Skip indented lines (code)
+        if line.startswith('    ') or line.startswith('\t'):
+            continue
+        # Skip lines with mostly special chars
+        alpha = sum(1 for c in s if c.isalpha() or c == ' ')
+        if alpha < len(s) * 0.5:
+            continue
+        good.append(s)
+
+    result = ' '.join(good).strip()
+    # Truncate to ~500 chars for TTS (about 30 seconds of speech)
+    if len(result) > 500:
+        # Cut at sentence boundary
+        cut = result[:500]
+        last_dot = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
+        if last_dot > 200:
+            result = cut[:last_dot + 1]
+        else:
+            result = cut + '...'
+    return result
 
 
 @app.post("/narrator/{session_id}/enable")
 async def narrator_enable(session_id: str):
     validate_id(session_id)
-    state = NARRATOR_STATE.setdefault(session_id, {"enabled": False, "queue": [], "pid": None})
-
-    if state["enabled"] and state.get("pid"):
-        # Check if process is still running
-        try:
-            os.kill(state["pid"], 0)
-            return {"ok": True, "status": "already running"}
-        except OSError:
-            pass
-
+    state = NARRATOR_STATE.setdefault(session_id, {"enabled": False, "queue": []})
     state["enabled"] = True
     state["queue"] = []
-
-    # Launch narrator subprocess
-    narrator_log = DATA_DIR / "narrator.log"
-    log_fd = open(narrator_log, "a")
-    proc = subprocess.Popen(
-        ["python3", "-u", str(NARRATOR_SCRIPT), session_id],
-        cwd=str(NARRATOR_SCRIPT.parent),
-        env={**os.environ, "LLM_WEB_PORT": "8921"},
-        stdout=log_fd,
-        stderr=log_fd,
-    )
-    state["pid"] = proc.pid
-    print(f"[NARRATOR] Started for session '{session_id}', PID={proc.pid}")
-    return {"ok": True, "status": "started", "pid": proc.pid}
+    print(f"[NARRATOR] Enabled for session '{session_id}'")
+    return {"ok": True, "status": "enabled"}
 
 
 @app.post("/narrator/{session_id}/disable")
@@ -811,19 +842,13 @@ async def narrator_disable(session_id: str):
     if state:
         state["enabled"] = False
         state["queue"] = []
-        if state.get("pid"):
-            try:
-                os.kill(state["pid"], 15)  # SIGTERM
-                print(f"[NARRATOR] Stopped for session '{session_id}', PID={state['pid']}")
-            except OSError:
-                pass
-            state["pid"] = None
-    return {"ok": True, "status": "stopped"}
+    print(f"[NARRATOR] Disabled for session '{session_id}'")
+    return {"ok": True, "status": "disabled"}
 
 
 @app.get("/narrator/{session_id}/next")
 async def narrator_next(session_id: str):
-    """Frontend polls this — returns proxied audio if available."""
+    """Frontend polls this — returns audio WAV if available."""
     validate_id(session_id)
     state = NARRATOR_STATE.get(session_id)
     if not state or not state["queue"]:
@@ -831,39 +856,83 @@ async def narrator_next(session_id: str):
             content=json_mod.dumps({"url": None}),
             media_type="application/json",
         )
-    url = state["queue"].pop(0)
-    print(f"[NARRATOR] Serving audio to frontend: {url}")
-    # Proxy the audio through our server (same-origin, avoids CORS/iOS issues)
-    try:
-        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                return Response(
-                    content=resp.content,
-                    media_type="audio/wav",
-                    headers={"X-Narrator": "true"},
-                )
-    except Exception as e:
-        print(f"[NARRATOR] Proxy error: {e}")
+    audio_bytes = state["queue"].pop(0)
+    print(f"[NARRATOR] Serving audio to frontend ({len(audio_bytes)} bytes)")
     return Response(
-        content=json_mod.dumps({"url": None}),
-        media_type="application/json",
+        content=audio_bytes,
+        media_type="audio/wav",
+        headers={"X-Narrator": "true"},
     )
 
 
-class NarratorPush(BaseModel):
-    url: str
+class NarratorHookPayload(BaseModel):
+    text: str
+    claude_session_id: str = ""
 
 
-@app.post("/narrator/{session_id}/push")
-async def narrator_push(session_id: str, payload: NarratorPush):
-    """Narrator subprocess pushes audio URLs here."""
-    validate_id(session_id)
-    state = NARRATOR_STATE.get(session_id)
-    if not state or not state["enabled"]:
-        return {"ok": False, "detail": "narrator not enabled"}
-    state["queue"].append(payload.url)
-    return {"ok": True}
+@app.post("/narrator/hook")
+async def narrator_hook(payload: NarratorHookPayload):
+    """Called by Claude Stop hook — receives assistant response text, generates TTS."""
+    text = payload.text.strip()
+    if not text or len(text) < 20:
+        return {"ok": False, "detail": "text too short"}
+
+    # Find any enabled narrator session to push audio to
+    enabled_sessions = [sid for sid, st in NARRATOR_STATE.items() if st.get("enabled")]
+    if not enabled_sessions:
+        return {"ok": False, "detail": "no narrator sessions enabled"}
+
+    # Summarize text for speech
+    summary = _narrator_summarize(text)
+    if not summary or len(summary) < 10:
+        print(f"[NARRATOR] Hook: text too short after summarize ({len(summary)} chars)")
+        return {"ok": False, "detail": "summary too short"}
+
+    print(f"[NARRATOR] Hook: summarized to {len(summary)} chars: {summary[:100]}...")
+
+    # Send to TTS API
+    try:
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            resp = await client.post(
+                TTS_API_URL,
+                json={
+                    "text": summary,
+                    "voice": "kseniya",
+                    "style": "fast",
+                    "token": ASR_TOKEN,
+                },
+            )
+            if resp.status_code != 200:
+                print(f"[NARRATOR] TTS API error: {resp.status_code} {resp.text[:200]}")
+                return {"ok": False, "detail": "TTS API error"}
+
+            tts_data = resp.json()
+            audio_url = tts_data.get("url", "")
+            if not audio_url:
+                print("[NARRATOR] TTS API returned no URL")
+                return {"ok": False, "detail": "no audio URL"}
+
+            # Download the audio and store as bytes (avoids CORS/proxy issues)
+            audio_resp = await client.get(audio_url)
+            if audio_resp.status_code != 200:
+                print(f"[NARRATOR] Audio download error: {audio_resp.status_code}")
+                return {"ok": False, "detail": "audio download error"}
+
+            audio_bytes = audio_resp.content
+            print(f"[NARRATOR] Audio ready: {len(audio_bytes)} bytes from {audio_url}")
+
+    except Exception as e:
+        print(f"[NARRATOR] TTS error: {e}")
+        return {"ok": False, "detail": str(e)}
+
+    # Push audio to all enabled sessions
+    for sid in enabled_sessions:
+        st = NARRATOR_STATE.get(sid)
+        if st and st.get("enabled"):
+            st["queue"].append(audio_bytes)
+            print(f"[NARRATOR] Pushed audio to session '{sid}'")
+
+    return {"ok": True, "summary": summary[:100]}
 
 
 # --- SSL Certificate download (for iOS mic fix) ---

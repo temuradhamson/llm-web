@@ -807,16 +807,29 @@ async function toggleMic() {
     } catch { alert('Нет доступа к микрофону'); }
 }
 
-// --- Narrator (server-side sub-agent) ---
+// --- Narrator (hook-driven TTS) ---
 let narratorEnabled = localStorage.getItem('narrator') === 'true';
 let narratorPollTimer = null;
+let narratorPlaying = false;
+let narratorBlobUrl = null;
+let narratorAudioQueue = []; // Queue of blobs waiting to play
+let narratorAudioUnlocked = false;
 
-// Persistent audio element — unlocked on user gesture, reused for all playback
+// Persistent audio element for iOS — must be created early and unlocked on gesture
 const narratorEl = document.createElement('audio');
 narratorEl.setAttribute('playsinline', '');
 narratorEl.setAttribute('webkit-playsinline', '');
-let narratorPlaying = false;
-let narratorBlobUrl = null;
+document.body.appendChild(narratorEl); // Attach to DOM for iOS
+
+// Keep iOS audio context alive with silent pings every 5s
+let narratorKeepAlive = null;
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+
+function narratorPingSilent() {
+    if (!narratorAudioUnlocked) return;
+    narratorEl.src = SILENT_WAV;
+    narratorEl.play().catch(() => {});
+}
 
 setTimeout(() => {
     if (narratorEnabled) {
@@ -827,9 +840,12 @@ setTimeout(() => {
 }, 500);
 
 function toggleNarrator() {
-    // Unlock audio on iOS by playing silent sound in user gesture handler
-    narratorEl.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-    narratorEl.play().catch(() => {});
+    // Unlock audio on iOS — MUST happen in user gesture handler
+    narratorEl.src = SILENT_WAV;
+    narratorEl.play().then(() => {
+        narratorAudioUnlocked = true;
+        console.log('[Narrator] Audio unlocked');
+    }).catch(() => {});
 
     narratorEnabled = !narratorEnabled;
     localStorage.setItem('narrator', narratorEnabled);
@@ -839,12 +855,15 @@ function toggleNarrator() {
     if (narratorEnabled) {
         if (currentSession) enableNarrator(currentSession);
         startNarratorPolling();
+        // Start keep-alive pings for iOS
+        narratorKeepAlive = setInterval(narratorPingSilent, 5000);
     } else {
-        // Disable narrator on server
         if (currentSession) disableNarrator(currentSession);
         stopNarratorPolling();
         btn.classList.remove('speaking');
-        if (narratorAudio) { narratorAudio.pause(); narratorAudio = null; }
+        narratorAudioQueue = [];
+        narratorPlaying = false;
+        if (narratorKeepAlive) { clearInterval(narratorKeepAlive); narratorKeepAlive = null; }
     }
 }
 
@@ -863,8 +882,44 @@ function stopNarratorPolling() {
     if (narratorPollTimer) { clearInterval(narratorPollTimer); narratorPollTimer = null; }
 }
 
+function playNextFromQueue() {
+    if (narratorAudioQueue.length === 0) {
+        narratorPlaying = false;
+        document.getElementById('narratorBtn').classList.remove('speaking');
+        return;
+    }
+
+    const blob = narratorAudioQueue.shift();
+    if (narratorBlobUrl) URL.revokeObjectURL(narratorBlobUrl);
+    narratorBlobUrl = URL.createObjectURL(blob);
+
+    console.log('[Narrator] Playing from queue, size:', blob.size, 'remaining:', narratorAudioQueue.length);
+    const btn = document.getElementById('narratorBtn');
+    btn.classList.add('speaking');
+    narratorPlaying = true;
+
+    narratorEl.src = narratorBlobUrl;
+    narratorEl.onended = () => {
+        console.log('[Narrator] Playback ended');
+        playNextFromQueue();
+    };
+    narratorEl.onerror = (e) => {
+        console.error('[Narrator] Playback error:', e);
+        playNextFromQueue();
+    };
+    narratorEl.play().catch((e) => {
+        console.error('[Narrator] Play blocked:', e);
+        // On iOS, try again after a short delay
+        setTimeout(() => {
+            narratorEl.play().catch(() => {
+                playNextFromQueue();
+            });
+        }, 200);
+    });
+}
+
 async function pollNarrator() {
-    if (!narratorEnabled || !currentSession || narratorPlaying) return;
+    if (!narratorEnabled || !currentSession) return;
 
     try {
         const res = await fetch(`${API}/narrator/${currentSession}/next`);
@@ -876,32 +931,18 @@ async function pollNarrator() {
         const blob = await res.blob();
         if (blob.size < 100) return;
 
-        // Revoke previous blob
-        if (narratorBlobUrl) URL.revokeObjectURL(narratorBlobUrl);
-        narratorBlobUrl = URL.createObjectURL(blob);
+        console.log('[Narrator] Received audio:', blob.size, 'bytes');
 
-        console.log('[Narrator] Playing, size:', blob.size);
-        const btn = document.getElementById('narratorBtn');
-        btn.classList.add('speaking');
-        narratorPlaying = true;
+        // Add to queue
+        narratorAudioQueue.push(blob);
 
-        narratorEl.src = narratorBlobUrl;
-        narratorEl.onended = () => {
-            console.log('[Narrator] Done');
-            btn.classList.remove('speaking');
-            narratorPlaying = false;
-        };
-        narratorEl.onerror = () => {
-            console.error('[Narrator] Error');
-            btn.classList.remove('speaking');
-            narratorPlaying = false;
-        };
-        narratorEl.play().catch((e) => {
-            console.error('[Narrator] Play blocked:', e);
-            btn.classList.remove('speaking');
-            narratorPlaying = false;
-        });
-    } catch {}
+        // Start playing if not already
+        if (!narratorPlaying) {
+            playNextFromQueue();
+        }
+    } catch (e) {
+        console.error('[Narrator] Poll error:', e);
+    }
 }
 
 // --- Password modal ---
