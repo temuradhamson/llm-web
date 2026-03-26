@@ -87,7 +87,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         # Allow public paths, static, and websocket (ws auth checked separately)
-        if path in PUBLIC_PATHS or path.startswith("/ws/") or path.endswith("/push") or path == "/narrator/hook":
+        if path in PUBLIC_PATHS or path.startswith("/ws/") or path.endswith("/push") or path.startswith("/narrator/"):
+            # All narrator endpoints allowed (enable/disable/next check auth or localhost inside)
             return await call_next(request)
 
         user = get_user_from_request(request)
@@ -825,8 +826,20 @@ def _narrator_summarize(text: str) -> str:
     return result
 
 
+def _narrator_check_auth(request: Request):
+    """Allow if authenticated user OR localhost."""
+    user = get_user_from_request(request)
+    if user:
+        return
+    client_host = request.client.host if request.client else ""
+    if client_host in ("127.0.0.1", "::1", "localhost"):
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @app.post("/narrator/{session_id}/enable")
-async def narrator_enable(session_id: str):
+async def narrator_enable(session_id: str, request: Request):
+    _narrator_check_auth(request)
     validate_id(session_id)
     state = NARRATOR_STATE.setdefault(session_id, {"enabled": False, "queue": []})
     state["enabled"] = True
@@ -836,7 +849,8 @@ async def narrator_enable(session_id: str):
 
 
 @app.post("/narrator/{session_id}/disable")
-async def narrator_disable(session_id: str):
+async def narrator_disable(session_id: str, request: Request):
+    _narrator_check_auth(request)
     validate_id(session_id)
     state = NARRATOR_STATE.get(session_id)
     if state:
@@ -847,8 +861,9 @@ async def narrator_disable(session_id: str):
 
 
 @app.get("/narrator/{session_id}/next")
-async def narrator_next(session_id: str):
+async def narrator_next(session_id: str, request: Request):
     """Frontend polls this — returns audio WAV if available."""
+    _narrator_check_auth(request)
     validate_id(session_id)
     state = NARRATOR_STATE.get(session_id)
     if not state or not state["queue"]:
