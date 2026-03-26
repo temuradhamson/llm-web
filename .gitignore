@@ -4,3 +4,4 @@ __pycache__/
 *.key
 *.pem
 node_modules/
+.last_good_commit
