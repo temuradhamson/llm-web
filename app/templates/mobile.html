@@ -447,13 +447,14 @@ function closeDrawer() {
     document.getElementById('drawerOverlay').classList.remove('open');
 }
 
-// Swipe left→right to open drawer
+// Swipe left→right anywhere to open drawer (two-finger or single from left half)
 (function() {
     let startX = null, startY = null;
     document.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) return;
         const t = e.touches[0];
-        // Only detect swipes starting from left edge (< 30px)
-        if (t.clientX < 30) {
+        // Start tracking from left half of screen
+        if (t.clientX < window.innerWidth * 0.5) {
             startX = t.clientX;
             startY = t.clientY;
         }
@@ -462,11 +463,13 @@ function closeDrawer() {
         if (startX === null) return;
         const dx = e.touches[0].clientX - startX;
         const dy = Math.abs(e.touches[0].clientY - startY);
-        // Horizontal swipe > 60px, and mostly horizontal (not vertical scroll)
-        if (dx > 60 && dy < 50) {
+        // Horizontal swipe > 80px, mostly horizontal
+        if (dx > 80 && dy < 40) {
             openDrawer();
             startX = null;
         }
+        // Cancel if scrolling vertically
+        if (dy > 40) startX = null;
     }, { passive: true });
     document.addEventListener('touchend', () => { startX = null; }, { passive: true });
 })();
