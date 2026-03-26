@@ -504,10 +504,13 @@ function closeDrawer() {
 })();
 function switchSession(id) {
     if (id === currentSession) { closeDrawer(); return; }
+    // Switch narrator to new session
+    if (narratorEnabled && currentSession) disableNarrator(currentSession);
     currentSession = id;
     selectEl.value = id;
     lastOutput = '';
     outputEl.innerHTML = '';
+    if (narratorEnabled) enableNarrator(id);
     autoScroll = true;
     updateSessionName();
     updateDrawerList();
@@ -813,8 +816,10 @@ setTimeout(() => {
     if (narratorEnabled) {
         document.getElementById('narratorBtn').classList.add('active');
         startNarratorPolling();
+        // Also launch the narrator process on server
+        if (currentSession) enableNarrator(currentSession);
     }
-}, 0);
+}, 500);
 
 function toggleNarrator() {
     narratorEnabled = !narratorEnabled;

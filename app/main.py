@@ -92,7 +92,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         user = get_user_from_request(request)
         if not user:
-            if path.startswith("/sessions") or path.startswith("/asr"):
+            if path.startswith("/sessions") or path.startswith("/asr") or path.startswith("/narrator"):
                 return Response(status_code=401, content="Unauthorized")
             return RedirectResponse(url="/login", status_code=302)
 
@@ -790,12 +790,14 @@ async def narrator_enable(session_id: str):
     state["queue"] = []
 
     # Launch narrator subprocess
+    narrator_log = DATA_DIR / "narrator.log"
+    log_fd = open(narrator_log, "a")
     proc = subprocess.Popen(
-        ["python3", str(NARRATOR_SCRIPT), session_id],
+        ["python3", "-u", str(NARRATOR_SCRIPT), session_id],
         cwd=str(NARRATOR_SCRIPT.parent),
         env={**os.environ, "LLM_WEB_PORT": "8921"},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fd,
+        stderr=log_fd,
     )
     state["pid"] = proc.pid
     print(f"[NARRATOR] Started for session '{session_id}', PID={proc.pid}")
