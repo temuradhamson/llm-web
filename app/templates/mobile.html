@@ -20,19 +20,69 @@
 
         /* --- Header --- */
         .header {
-            display: flex; align-items: center; gap: 8px;
+            display: flex; align-items: center; justify-content: space-between;
             padding: 8px 12px; background: var(--bg2);
             border-bottom: 1px solid var(--border); flex-shrink: 0;
         }
-        .header select, .header button {
-            font-size: 14px; padding: 6px 10px; border-radius: 6px;
-            border: 1px solid var(--border); background: var(--bg3); color: var(--text);
-            outline: none; -webkit-appearance: none;
+        .header-left, .header-right { display: flex; align-items: center; gap: 8px; }
+
+        .hdr-btn {
+            width: 36px; height: 36px; border-radius: 8px; border: none;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; transition: transform .1s, opacity .1s;
         }
-        .header button { background: var(--accent); border-color: var(--accent); font-weight: 600; }
-        .header button.secondary { background: var(--bg3); border-color: var(--border); font-weight: 400; }
+        .hdr-btn:active { transform: scale(0.9); opacity: 0.7; }
+        .hdr-btn svg { width: 20px; height: 20px; }
+
+        .btn-burger { background: var(--bg3); }
+        .btn-burger svg { fill: var(--text); }
+
+        .btn-new { background: var(--ok); }
+        .btn-new svg { fill: var(--bg); }
+
+        .btn-delete { background: var(--bg3); }
+        .btn-delete svg { stroke: var(--accent); fill: none; }
+
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
         .status-dot.on { background: var(--ok); }
+
+        .session-name {
+            font-size: 14px; font-weight: 600; color: var(--text); max-width: 40vw;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+
+        /* Session drawer */
+        .drawer-overlay {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
+            z-index: 40;
+        }
+        .drawer-overlay.open { display: block; }
+        .drawer {
+            position: fixed; top: 0; left: -260px; width: 260px; height: 100%;
+            background: var(--bg2); border-right: 1px solid var(--border);
+            z-index: 41; transition: left .25s ease;
+            display: flex; flex-direction: column;
+            padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);
+        }
+        .drawer.open { left: 0; }
+        .drawer-title {
+            padding: 16px; font-size: 15px; font-weight: 600; color: var(--dim);
+            border-bottom: 1px solid var(--border);
+        }
+        .drawer-list {
+            flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+        }
+        .drawer-item {
+            padding: 12px 16px; font-size: 15px; color: var(--text);
+            border-bottom: 1px solid var(--border); cursor: pointer;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .drawer-item:active { background: var(--bg3); }
+        .drawer-item.active { color: var(--ok); font-weight: 600; }
+        .drawer-item .dot {
+            width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex-shrink: 0;
+        }
+        .drawer-item.active .dot { background: var(--ok); }
 
         /* --- Terminal output --- */
         .terminal-scroll {
@@ -142,13 +192,40 @@
 </head>
 <body>
 
+<!-- Session drawer -->
+<div class="drawer-overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+    <div class="drawer-title">Сессии</div>
+    <div class="drawer-list" id="drawerList"></div>
+</div>
+
 <!-- Header -->
 <div class="header">
-    <div class="status-dot" id="statusDot"></div>
-    <select id="sessionSelect"><option value="">-- нет сессий --</option></select>
-    <button onclick="openCreate()">+</button>
-    <button class="secondary" onclick="deleteSession()">Del</button>
+    <div class="header-left">
+        <button class="hdr-btn btn-burger" onclick="toggleDrawer()">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/>
+            </svg>
+        </button>
+        <div class="status-dot" id="statusDot"></div>
+        <span class="session-name" id="sessionName">-- нет сессий --</span>
+    </div>
+    <div class="header-right">
+        <button class="hdr-btn btn-new" onclick="openCreate()">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+            </svg>
+        </button>
+        <button class="hdr-btn btn-delete" onclick="deleteSession()">
+            <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M5 6v14a2 2 0 002 2h10a2 2 0 002-2V6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+            </svg>
+        </button>
+    </div>
 </div>
+
+<!-- Hidden select for compatibility -->
+<select id="sessionSelect" style="display:none;"><option value="">--</option></select>
 
 <!-- Terminal output (scrollable) -->
 <div style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column;">
@@ -350,6 +427,40 @@ outputEl.addEventListener('scroll', () => {
     fabDown.classList.toggle('show', scrolledUp && !atBottom);
 });
 
+// --- Drawer ---
+function toggleDrawer() {
+    document.getElementById('drawer').classList.toggle('open');
+    document.getElementById('drawerOverlay').classList.toggle('open');
+}
+function closeDrawer() {
+    document.getElementById('drawer').classList.remove('open');
+    document.getElementById('drawerOverlay').classList.remove('open');
+}
+function switchSession(id) {
+    if (id === currentSession) { closeDrawer(); return; }
+    currentSession = id;
+    selectEl.value = id;
+    lastOutput = '';
+    outputEl.innerHTML = '';
+    autoScroll = true;
+    updateSessionName();
+    updateDrawerList();
+    startPolling();
+    closeDrawer();
+}
+function updateSessionName() {
+    document.getElementById('sessionName').textContent = currentSession || '-- нет сессий --';
+}
+function updateDrawerList() {
+    const list = document.getElementById('drawerList');
+    const items = Array.from(selectEl.options).filter(o => o.value);
+    list.innerHTML = items.map(o =>
+        `<div class="drawer-item${o.value === currentSession ? ' active' : ''}" onclick="switchSession('${o.value}')">
+            <span class="dot"></span>${o.value}
+        </div>`
+    ).join('');
+}
+
 // --- Sessions ---
 async function loadSessions() {
     try {
@@ -359,9 +470,11 @@ async function loadSessions() {
 
         selectEl.innerHTML = '';
         if (data.sessions.length === 0) {
-            selectEl.innerHTML = '<option value="">-- нет сессий --</option>';
+            selectEl.innerHTML = '<option value="">--</option>';
             currentSession = null;
             stopPolling();
+            updateSessionName();
+            updateDrawerList();
             return;
         }
 
@@ -378,18 +491,10 @@ async function loadSessions() {
             lastOutput = '';
             startPolling();
         }
+        updateSessionName();
+        updateDrawerList();
     } catch {}
 }
-
-selectEl.addEventListener('change', function() {
-    if (this.value && this.value !== currentSession) {
-        currentSession = this.value;
-        lastOutput = '';
-        outputEl.innerHTML = '';
-        autoScroll = true;
-        startPolling();
-    }
-});
 
 async function deleteSession() {
     if (!currentSession) return;
@@ -398,6 +503,7 @@ async function deleteSession() {
     await fetch(`${API}/sessions/${currentSession}`, { method: 'DELETE' });
     currentSession = null;
     outputEl.innerHTML = '';
+    updateSessionName();
     await loadSessions();
 }
 
