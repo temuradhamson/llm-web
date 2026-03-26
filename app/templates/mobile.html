@@ -875,30 +875,39 @@ async function pollNarrator() {
     try {
         const res = await fetch(`${API}/narrator/${currentSession}/next`);
         if (!res.ok) return;
-        const data = await res.json();
-        if (!data.url) return;
 
-        console.log('[Narrator] Playing:', data.url);
-        const btn = document.getElementById('narratorBtn');
-        btn.classList.add('speaking');
-        narratorAudio = new Audio(data.url);
-        narratorAudio.onended = () => {
-            console.log('[Narrator] Playback ended');
-            btn.classList.remove('speaking');
-            narratorAudio = null;
-        };
-        narratorAudio.onerror = (e) => {
-            console.error('[Narrator] Audio error:', e);
-            btn.classList.remove('speaking');
-            narratorAudio = null;
-        };
-        try {
-            await narratorAudio.play();
-        } catch (e) {
-            console.error('[Narrator] Play failed:', e);
-            btn.classList.remove('speaking');
-            narratorAudio = null;
+        // Check if response is audio (proxied) or JSON (empty queue)
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('audio')) {
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            console.log('[Narrator] Playing proxied audio, size:', blob.size);
+
+            const btn = document.getElementById('narratorBtn');
+            btn.classList.add('speaking');
+            narratorAudio = new Audio(url);
+            narratorAudio.onended = () => {
+                console.log('[Narrator] Playback ended');
+                btn.classList.remove('speaking');
+                narratorAudio = null;
+                URL.revokeObjectURL(url);
+            };
+            narratorAudio.onerror = (e) => {
+                console.error('[Narrator] Audio error:', e);
+                btn.classList.remove('speaking');
+                narratorAudio = null;
+                URL.revokeObjectURL(url);
+            };
+            try {
+                await narratorAudio.play();
+            } catch (e) {
+                console.error('[Narrator] Play failed:', e);
+                btn.classList.remove('speaking');
+                narratorAudio = null;
+                URL.revokeObjectURL(url);
+            }
         }
+        // else: JSON with {url: null} — nothing to play
     } catch {}
 }
 

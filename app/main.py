@@ -823,13 +823,32 @@ async def narrator_disable(session_id: str):
 
 @app.get("/narrator/{session_id}/next")
 async def narrator_next(session_id: str):
-    """Frontend polls this to get next audio to play."""
+    """Frontend polls this — returns proxied audio if available."""
     validate_id(session_id)
     state = NARRATOR_STATE.get(session_id)
     if not state or not state["queue"]:
-        return {"url": None}
+        return Response(
+            content=json_mod.dumps({"url": None}),
+            media_type="application/json",
+        )
     url = state["queue"].pop(0)
-    return {"url": url}
+    print(f"[NARRATOR] Serving audio to frontend: {url}")
+    # Proxy the audio through our server (same-origin, avoids CORS/iOS issues)
+    try:
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return Response(
+                    content=resp.content,
+                    media_type="audio/wav",
+                    headers={"X-Narrator": "true"},
+                )
+    except Exception as e:
+        print(f"[NARRATOR] Proxy error: {e}")
+    return Response(
+        content=json_mod.dumps({"url": None}),
+        media_type="application/json",
+    )
 
 
 class NarratorPush(BaseModel):
