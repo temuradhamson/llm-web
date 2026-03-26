@@ -119,12 +119,22 @@ def save_session_registry(registry: dict):
     SESSIONS_FILE.write_text(json_mod.dumps(registry, indent=2, ensure_ascii=False))
 
 
+def touch_session(session_id: str):
+    """Update last_active timestamp for a session."""
+    reg = load_session_registry()
+    if session_id in reg:
+        reg[session_id]["last_active"] = datetime.now().isoformat()
+        save_session_registry(reg)
+
+
 def register_session(session_id: str, workdir: str, cli: str):
     reg = load_session_registry()
+    now = datetime.now().isoformat()
     reg[session_id] = {
         "workdir": workdir,
         "cli": cli,
-        "created": datetime.now().isoformat(),
+        "created": now,
+        "last_active": now,
     }
     save_session_registry(reg)
 
@@ -406,6 +416,13 @@ def health():
         for s in proc.stdout.strip().splitlines()
         if s.startswith(f"{SESSION_PREFIX}-")
     ] if proc.returncode == 0 else []
+
+    # Sort by last_active (most recent first)
+    reg = load_session_registry()
+    sessions.sort(
+        key=lambda sid: reg.get(sid, {}).get("last_active", reg.get(sid, {}).get("created", "")),
+        reverse=True,
+    )
     return {"ok": True, "sessions": sessions}
 
 
@@ -525,6 +542,7 @@ async def send(session_id: str, payload: SendRequest):
     if send_enter.returncode != 0:
         raise HTTPException(status_code=500, detail=send_enter.stderr.strip() or "send enter failed")
 
+    touch_session(session_id)
     return {"ok": True, "session_id": session_id, "sent": text}
 
 
@@ -556,6 +574,7 @@ async def ws_terminal(ws: WebSocket, session_id: str):
         return
 
     await ws.accept()
+    touch_session(session_id)
 
     tmux("set-option", "-t", name, "aggressive-resize", "on")
     tmux("set-option", "-t", name, "status", "off")
