@@ -219,7 +219,7 @@
             </svg>
         </button>
         <div class="status-dot" id="statusDot"></div>
-        <span class="session-name" id="sessionName">-- нет сессий --</span>
+        <span class="session-name" id="sessionName" onclick="renameCurrentSession()">-- нет сессий --</span>
     </div>
     <div class="header-right">
         <button class="hdr-btn btn-new" onclick="openCreate()">
@@ -484,6 +484,10 @@ function updateDrawerList() {
 // Session display names (local only)
 let sessionNames = JSON.parse(localStorage.getItem('sessionNames') || '{}');
 function saveSessionNames() { localStorage.setItem('sessionNames', JSON.stringify(sessionNames)); }
+
+function renameCurrentSession() {
+    if (currentSession) renameSession(currentSession);
+}
 
 function renameSession(id) {
     const current = sessionNames[id] || id;
