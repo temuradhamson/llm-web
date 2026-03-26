@@ -200,47 +200,23 @@
         .fab-down:active { transform: scale(0.9); }
         .fab-down svg { width: 20px; height: 20px; fill: var(--dim); }
 
-        /* TTS play button */
-        .tts-line { display: flex; align-items: flex-start; gap: 6px; margin: 2px 0; }
-        .tts-text { flex: 1; }
-        .tts-btn {
-            flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%;
-            background: var(--blue); border: none; display: inline-flex;
-            align-items: center; justify-content: center; cursor: pointer;
-            transition: transform .1s, opacity .1s; vertical-align: middle;
-        }
-        .tts-btn:active { transform: scale(0.85); opacity: 0.7; }
-        .tts-btn.playing { background: var(--accent); }
-        .tts-btn svg { width: 14px; height: 14px; fill: #fff; }
-
-        /* Auto-voice toggle */
-        .voice-toggle {
+        /* Narrator audio indicator */
+        .narrator-indicator {
             width: 36px; height: 36px; border-radius: 8px; border: none;
             display: flex; align-items: center; justify-content: center;
-            cursor: pointer; transition: transform .1s, background .2s;
-            background: var(--bg3); position: relative;
+            background: var(--bg3); position: relative; cursor: pointer;
+            transition: background .2s;
         }
-        .voice-toggle:active { transform: scale(0.9); }
-        .voice-toggle svg { width: 20px; height: 20px; }
-        .voice-toggle.on { background: var(--blue); }
-        .voice-toggle.on svg { fill: #fff; }
-        .voice-toggle:not(.on) svg { fill: var(--dim); }
-        .voice-toggle .pulse-ring {
+        .narrator-indicator.active { background: var(--blue); }
+        .narrator-indicator svg { width: 20px; height: 20px; fill: var(--dim); }
+        .narrator-indicator.active svg { fill: #fff; }
+        .narrator-indicator.speaking { background: var(--ok); }
+        .narrator-indicator .pulse-ring {
             display: none; position: absolute; inset: -3px; border-radius: 10px;
-            border: 2px solid var(--blue); animation: voice-pulse 1.5s infinite;
+            border: 2px solid var(--ok); animation: narrator-pulse 1.5s infinite;
         }
-        .voice-toggle.on .pulse-ring { display: block; }
-        @keyframes voice-pulse { 0%,100%{opacity:.6;transform:scale(1)} 50%{opacity:0;transform:scale(1.15)} }
-
-        /* Play last response button */
-        .btn-play-last {
-            width: 36px; height: 36px; border-radius: 8px; border: none;
-            display: flex; align-items: center; justify-content: center;
-            cursor: pointer; transition: transform .1s; background: var(--bg3);
-        }
-        .btn-play-last:active { transform: scale(0.9); }
-        .btn-play-last svg { width: 20px; height: 20px; fill: var(--ok); }
-        .btn-play-last.playing svg { fill: var(--accent); }
+        .narrator-indicator.speaking .pulse-ring { display: block; }
+        @keyframes narrator-pulse { 0%,100%{opacity:.6;transform:scale(1)} 50%{opacity:0;transform:scale(1.15)} }
     </style>
 </head>
 <body>
@@ -268,7 +244,7 @@
         <span class="session-name" id="sessionName" onclick="renameCurrentSession()">-- нет сессий --</span>
     </div>
     <div class="header-right">
-        <button class="voice-toggle" id="voiceToggle" onclick="toggleAutoVoice()" title="Авто-озвучка">
+        <button class="narrator-indicator" id="narratorBtn" onclick="toggleNarrator()" title="Рассказчик">
             <span class="pulse-ring"></span>
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                 <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
@@ -454,14 +430,7 @@ async function pollOutput() {
         const raw = data.output || '';
         if (raw !== lastOutput) {
             lastOutput = raw;
-            let html = ansiToHtml(raw);
-            // Replace 🔊 lines with TTS play buttons
-            html = html.replace(/🔊\s*(.+?)(?=\n|$)/g, (_, text) => {
-                const clean = text.replace(/<[^>]*>/g, '').trim();
-                const encoded = clean.replace(/'/g, '&#39;');
-                return `<span class="tts-line"><span class="tts-text">🔊 ${text}</span><button class="tts-btn" onclick="playTTS('${encoded}', this)" title="Озвучить"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button></span>`;
-            });
-            outputEl.innerHTML = html;
+            outputEl.innerHTML = ansiToHtml(raw);
             if (autoScroll) scrollToBottom();
         }
         document.getElementById('statusDot').classList.add('on');
@@ -692,7 +661,6 @@ async function sendInput() {
     inputEl.style.height = 'auto';
     document.getElementById('inputWrap').classList.remove('has-voice');
     autoScroll = true;
-    voiceCooldown(text); // don't voice user's own message echo
 
     await fetch(`${API}/sessions/${currentSession}/send`, {
         method: 'POST',
@@ -836,291 +804,79 @@ async function toggleMic() {
     } catch { alert('Нет доступа к микрофону'); }
 }
 
-// --- TTS ---
-let currentAudio = null;
-let currentTTSBtn = null;
-let autoVoice = localStorage.getItem('autoVoice') === 'true';
-let lastVoicedOutput = '';
-let voiceCooldownUntil = 0;  // timestamp: don't voice until this time (skip user echo)
-let lastSentTexts = [];      // recent user messages to filter from voice output
-let pendingVoiceBuffer = ''; // accumulates text until sentence boundary
-let ttsQueue = [];
-let ttsPlaying = false;
-let voicePollTimer = null;
-let voiceIdleTimer = null; // flush remaining buffer when output stops changing
-let voiceLastChangeTime = 0;
+// --- Narrator (server-side sub-agent) ---
+let narratorEnabled = localStorage.getItem('narrator') === 'true';
+let narratorAudio = null;
+let narratorPollTimer = null;
 
-// Init toggle state on DOM ready
 setTimeout(() => {
-    if (autoVoice) {
-        document.getElementById('voiceToggle').classList.add('on');
-        startVoicePolling();
+    if (narratorEnabled) {
+        document.getElementById('narratorBtn').classList.add('active');
+        startNarratorPolling();
     }
 }, 0);
 
-function toggleAutoVoice() {
-    autoVoice = !autoVoice;
-    localStorage.setItem('autoVoice', autoVoice);
-    document.getElementById('voiceToggle').classList.toggle('on', autoVoice);
-    if (autoVoice) {
-        lastVoicedOutput = lastOutput;
-        pendingVoiceBuffer = '';
-        startVoicePolling();
+function toggleNarrator() {
+    narratorEnabled = !narratorEnabled;
+    localStorage.setItem('narrator', narratorEnabled);
+    const btn = document.getElementById('narratorBtn');
+    btn.classList.toggle('active', narratorEnabled);
+
+    if (narratorEnabled) {
+        // Enable narrator on server for current session
+        if (currentSession) enableNarrator(currentSession);
+        startNarratorPolling();
     } else {
-        stopVoicePolling();
-        ttsQueue = [];
-        pendingVoiceBuffer = '';
-        if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+        // Disable narrator on server
+        if (currentSession) disableNarrator(currentSession);
+        stopNarratorPolling();
+        btn.classList.remove('speaking');
+        if (narratorAudio) { narratorAudio.pause(); narratorAudio = null; }
     }
 }
 
-function startVoicePolling() {
-    stopVoicePolling();
-    voicePollTimer = setInterval(voicePoll, 800);
+async function enableNarrator(sessionId) {
+    await fetch(`${API}/narrator/${sessionId}/enable`, { method: 'POST' }).catch(() => {});
 }
-function stopVoicePolling() {
-    if (voicePollTimer) { clearInterval(voicePollTimer); voicePollTimer = null; }
+async function disableNarrator(sessionId) {
+    await fetch(`${API}/narrator/${sessionId}/disable`, { method: 'POST' }).catch(() => {});
 }
 
-// Separate fast poll just for voice — reads terminal independently
-async function voicePoll() {
-    if (!autoVoice || !currentSession) return;
-    if (Date.now() < voiceCooldownUntil) return; // skip during cooldown after user send
+function startNarratorPolling() {
+    stopNarratorPolling();
+    narratorPollTimer = setInterval(pollNarrator, 1500);
+}
+function stopNarratorPolling() {
+    if (narratorPollTimer) { clearInterval(narratorPollTimer); narratorPollTimer = null; }
+}
+
+async function pollNarrator() {
+    if (!narratorEnabled || !currentSession) return;
+    // Don't poll if already playing
+    if (narratorAudio && !narratorAudio.paused) return;
 
     try {
-        const res = await fetch(`${API}/sessions/${currentSession}/tail?full=true`);
+        const res = await fetch(`${API}/narrator/${currentSession}/next`);
         if (!res.ok) return;
         const data = await res.json();
-        const raw = data.output || '';
-        if (raw === lastVoicedOutput) return;
-        voiceLastChangeTime = Date.now();
-        processAutoVoice(raw);
-        // Set idle timer: if output stops changing for 2s, flush remaining buffer
-        clearTimeout(voiceIdleTimer);
-        voiceIdleTimer = setTimeout(() => {
-            if (pendingVoiceBuffer && pendingVoiceBuffer.length >= 10) {
-                queueTTS(pendingVoiceBuffer.trim());
-                pendingVoiceBuffer = '';
-            }
-        }, 2000);
+        if (!data.url) return;
+
+        const btn = document.getElementById('narratorBtn');
+        btn.classList.add('speaking');
+        narratorAudio = new Audio(data.url);
+        narratorAudio.onended = () => {
+            btn.classList.remove('speaking');
+            narratorAudio = null;
+        };
+        narratorAudio.onerror = () => {
+            btn.classList.remove('speaking');
+            narratorAudio = null;
+        };
+        await narratorAudio.play().catch(() => {
+            btn.classList.remove('speaking');
+            narratorAudio = null;
+        });
     } catch {}
-}
-
-// Mark cooldown when user sends a message (skip echo)
-function voiceCooldown(sentText) {
-    voiceCooldownUntil = Date.now() + 4000;
-    lastVoicedOutput = lastOutput;
-    pendingVoiceBuffer = '';
-    // Remember sent text to filter it from voice output
-    if (sentText) {
-        lastSentTexts.push(sentText.toLowerCase().trim());
-        // Keep only last 5
-        if (lastSentTexts.length > 5) lastSentTexts.shift();
-    }
-}
-
-// Strip ANSI codes and markdown formatting for TTS
-function stripForTTS(text) {
-    return text
-        // ANSI escape codes
-        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-        .replace(/\x1b[^\x1b]{0,8}/g, '')
-        // Markdown: bold, italic, code
-        .replace(/\*\*([^*]+)\*\*/g, '$1')
-        .replace(/\*([^*]+)\*/g, '$1')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/^#{1,6}\s+/gm, '')
-        // Bullet points → just the text
-        .replace(/^[\s]*[-*+•]\s+/gm, '')
-        // Numbered lists
-        .replace(/^[\s]*\d+[.)]\s+/gm, '')
-        // Clean up extra whitespace
-        .replace(/\s+/g, ' ');
-}
-
-// Is this line code/noise that should NOT be voiced?
-function isNoise(line) {
-    const t = line.trim();
-    if (!t || t.length < 3) return true;
-    // Indented code blocks (4+ spaces)
-    if (/^\s{4,}\S/.test(line)) return true;
-    // Code fences
-    if (/^```/.test(t)) return true;
-    // Programming keywords at start of line
-    if (/^(import |from |def |class |const |let |var |function |async function|return |if \(|else\b|for \(|while \(|try\b|catch\b|export |module\.)/.test(t)) return true;
-    // Line numbers (e.g. "123→" or "  45\t")
-    if (/^\s*\d+[→│|:\t]/.test(t)) return true;
-    // Box drawing
-    if (/^[─━═╔╗╚╝├┤┬┴┼┌┐└┘│╭╮╰╯┃]/.test(t)) return true;
-    // Log lines
-    if (/^(INFO|WARNING|ERROR|DEBUG|HTTP\/|Shell cwd|\[.*\]\s*(INFO|WARN|ERROR))/.test(t)) return true;
-    // File paths on their own
-    if (/^[\/~][a-zA-Z0-9_\/.]+$/.test(t)) return true;
-    // Shell commands
-    if (/^\$\s/.test(t)) return true;
-    // Pure punctuation/symbols
-    if (/^[^а-яА-ЯёЁa-zA-Z]*$/.test(t)) return true;
-    return false;
-}
-
-// Process new terminal output for auto-voice
-function processAutoVoice(raw) {
-    if (!autoVoice || !raw) return;
-
-    // Find what's new since last check
-    let newPart = '';
-    if (!lastVoicedOutput) {
-        lastVoicedOutput = raw;
-        return;
-    }
-
-    // Simple diff: find common prefix
-    let i = 0;
-    const minLen = Math.min(lastVoicedOutput.length, raw.length);
-    while (i < minLen && lastVoicedOutput[i] === raw[i]) i++;
-    newPart = raw.substring(i);
-    lastVoicedOutput = raw;
-
-    if (!newPart || newPart.length < 5) return;
-
-    // Clean the new part
-    const clean = stripForTTS(newPart);
-    const lines = clean.split('\n');
-
-    // Keep non-noise lines, skip user message echoes
-    const good = [];
-    for (const line of lines) {
-        if (isNoise(line)) continue;
-        const trimmed = line.trim();
-        // Check if this line matches any recently sent user message
-        const lower = trimmed.toLowerCase();
-        let isUserEcho = false;
-        for (const sent of lastSentTexts) {
-            // Match if line contains significant portion of sent text or vice versa
-            if (sent.length > 10 && (lower.includes(sent.substring(0, 30)) || sent.includes(lower.substring(0, 30)))) {
-                isUserEcho = true;
-                break;
-            }
-            if (sent.length <= 10 && lower === sent) {
-                isUserEcho = true;
-                break;
-            }
-        }
-        if (isUserEcho) continue;
-        good.push(trimmed);
-    }
-    if (good.length === 0) return;
-
-    // Add to buffer
-    const chunk = good.join(' ').replace(/\s+/g, ' ').trim();
-    if (!chunk) return;
-    pendingVoiceBuffer += (pendingVoiceBuffer ? ' ' : '') + chunk;
-
-    // Flush logic: send to TTS as soon as we have enough text
-    flushVoiceBuffer();
-}
-
-function flushVoiceBuffer() {
-    if (!pendingVoiceBuffer || pendingVoiceBuffer.length < 15) return;
-
-    // Look for natural break points: sentence endings
-    // Match period/exclamation/question followed by space (or end)
-    const match = pendingVoiceBuffer.match(/^(.{15,}?[.!?:—])\s/);
-    if (match) {
-        const toVoice = match[1].trim();
-        pendingVoiceBuffer = pendingVoiceBuffer.substring(match[0].length).trim();
-        if (toVoice.length >= 10) queueTTS(toVoice);
-        // Recursively flush if more sentences ready
-        if (pendingVoiceBuffer.length > 15) flushVoiceBuffer();
-    } else if (pendingVoiceBuffer.length > 150) {
-        // No sentence boundary found but buffer is long — flush at word boundary
-        const cutAt = pendingVoiceBuffer.lastIndexOf(' ', 150);
-        const idx = cutAt > 50 ? cutAt : 150;
-        const toVoice = pendingVoiceBuffer.substring(0, idx).trim();
-        pendingVoiceBuffer = pendingVoiceBuffer.substring(idx).trim();
-        if (toVoice.length >= 10) queueTTS(toVoice);
-    }
-}
-
-// Queue TTS and play sequentially
-function queueTTS(text) {
-    if (!text || text.length < 10) return;
-    const limited = text.length > 600 ? text.substring(0, 600) : text;
-    ttsQueue.push(limited);
-    if (!ttsPlaying) playNextTTS();
-}
-
-async function playNextTTS() {
-    if (ttsQueue.length === 0) {
-        ttsPlaying = false;
-        return;
-    }
-    ttsPlaying = true;
-    const text = ttsQueue.shift();
-
-    try {
-        const res = await fetch(`${API}/tts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
-        });
-        if (!res.ok) { playNextTTS(); return; }
-        const data = await res.json();
-        if (!data.url) { playNextTTS(); return; }
-
-        currentAudio = new Audio(data.url);
-        currentAudio.onended = () => { currentAudio = null; playNextTTS(); };
-        currentAudio.onerror = () => { currentAudio = null; playNextTTS(); };
-        await currentAudio.play().catch(() => { currentAudio = null; playNextTTS(); });
-    } catch {
-        playNextTTS();
-    }
-}
-
-async function playTTS(text, btn) {
-    // If same button clicked while playing — stop
-    if (currentAudio && currentTTSBtn === btn) {
-        currentAudio.pause();
-        currentAudio = null;
-        btn.classList.remove('playing');
-        currentTTSBtn = null;
-        return;
-    }
-    // Stop previous
-    if (currentAudio) {
-        currentAudio.pause();
-        if (currentTTSBtn) currentTTSBtn.classList.remove('playing');
-    }
-
-    btn.classList.add('playing');
-    currentTTSBtn = btn;
-
-    try {
-        const res = await fetch(`${API}/tts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
-        });
-        if (!res.ok) { btn.classList.remove('playing'); currentTTSBtn = null; return; }
-        const data = await res.json();
-        if (!data.url) { btn.classList.remove('playing'); currentTTSBtn = null; return; }
-        currentAudio = new Audio(data.url);
-        currentAudio.onended = () => {
-            btn.classList.remove('playing');
-            currentTTSBtn = null;
-            currentAudio = null;
-        };
-        currentAudio.onerror = () => {
-            btn.classList.remove('playing');
-            currentTTSBtn = null;
-            currentAudio = null;
-        };
-        currentAudio.play();
-    } catch {
-        btn.classList.remove('playing');
-        currentTTSBtn = null;
-    }
 }
 
 // --- Password modal ---

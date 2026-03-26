@@ -87,7 +87,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         # Allow public paths, static, and websocket (ws auth checked separately)
-        if path in PUBLIC_PATHS or path.startswith("/ws/"):
+        if path in PUBLIC_PATHS or path.startswith("/ws/") or path.endswith("/push"):
             return await call_next(request)
 
         user = get_user_from_request(request)
@@ -764,6 +764,85 @@ async def tts(payload: TTSRequest):
 
     data = resp.json()
     return {"ok": True, "url": data.get("url", "")}
+
+
+# --- Narrator (server-side sub-agent) ---
+
+# In-memory state: session_id -> {"enabled": bool, "queue": [audio_urls], "pid": int|None}
+NARRATOR_STATE: dict[str, dict] = {}
+NARRATOR_SCRIPT = Path(__file__).parent.parent / "narrator.py"
+
+
+@app.post("/narrator/{session_id}/enable")
+async def narrator_enable(session_id: str):
+    validate_id(session_id)
+    state = NARRATOR_STATE.setdefault(session_id, {"enabled": False, "queue": [], "pid": None})
+
+    if state["enabled"] and state.get("pid"):
+        # Check if process is still running
+        try:
+            os.kill(state["pid"], 0)
+            return {"ok": True, "status": "already running"}
+        except OSError:
+            pass
+
+    state["enabled"] = True
+    state["queue"] = []
+
+    # Launch narrator subprocess
+    proc = subprocess.Popen(
+        ["python3", str(NARRATOR_SCRIPT), session_id],
+        cwd=str(NARRATOR_SCRIPT.parent),
+        env={**os.environ, "LLM_WEB_PORT": "8921"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    state["pid"] = proc.pid
+    print(f"[NARRATOR] Started for session '{session_id}', PID={proc.pid}")
+    return {"ok": True, "status": "started", "pid": proc.pid}
+
+
+@app.post("/narrator/{session_id}/disable")
+async def narrator_disable(session_id: str):
+    validate_id(session_id)
+    state = NARRATOR_STATE.get(session_id)
+    if state:
+        state["enabled"] = False
+        state["queue"] = []
+        if state.get("pid"):
+            try:
+                os.kill(state["pid"], 15)  # SIGTERM
+                print(f"[NARRATOR] Stopped for session '{session_id}', PID={state['pid']}")
+            except OSError:
+                pass
+            state["pid"] = None
+    return {"ok": True, "status": "stopped"}
+
+
+@app.get("/narrator/{session_id}/next")
+async def narrator_next(session_id: str):
+    """Frontend polls this to get next audio to play."""
+    validate_id(session_id)
+    state = NARRATOR_STATE.get(session_id)
+    if not state or not state["queue"]:
+        return {"url": None}
+    url = state["queue"].pop(0)
+    return {"url": url}
+
+
+class NarratorPush(BaseModel):
+    url: str
+
+
+@app.post("/narrator/{session_id}/push")
+async def narrator_push(session_id: str, payload: NarratorPush):
+    """Narrator subprocess pushes audio URLs here."""
+    validate_id(session_id)
+    state = NARRATOR_STATE.get(session_id)
+    if not state or not state["enabled"]:
+        return {"ok": False, "detail": "narrator not enabled"}
+    state["queue"].append(payload.url)
+    return {"ok": True}
 
 
 # --- SSL Certificate download (for iOS mic fix) ---
