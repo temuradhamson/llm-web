@@ -3,31 +3,15 @@
 Safe deploy & watchdog for llm-web.
 
 Modes:
-    python3 safe_deploy.py deploy -m "msg"   Deploy: commit, restart, health check, rollback if broken
-    python3 safe_deploy.py watchdog           Watchdog: monitor health every 30s, auto-rollback on failure
-    python3 safe_deploy.py health             Just check if service is alive
+    python3 safe_deploy.py deploy -m "msg"   Deploy with black box recording
+    python3 safe_deploy.py watchdog           Monitor health, auto-rollback with crash report
+    python3 safe_deploy.py health             Single health check
+    python3 safe_deploy.py crashes            Show recent crash reports
 
-How watchdog works:
-    - Runs as a separate PM2 process (llm-web-watchdog)
-    - Every 30 seconds checks GET /health
-    - If 3 consecutive checks fail (~90 seconds of downtime):
-        1. Reads .last_good_commit
-        2. git reset --hard to that commit
-        3. Restarts llm-web via PM2
-        4. Verifies recovery
-    - Logs everything to stdout (visible via pm2 logs llm-web-watchdog)
-
-Timeline of self-healing:
-    0s    — bad code deployed, service crashes
-    0-30s — PM2 autorestart tries to bring it back (will fail if code is broken)
-    30s   — watchdog detects first failure
-    60s   — watchdog detects second failure
-    90s   — watchdog detects third failure → ROLLBACK triggered
-    95s   — git reset --hard to last good commit
-    98s   — PM2 restart with good code
-    ~100s — service is back online
-
-    Worst case: ~100 seconds of downtime.
+Black box system:
+    Before each deploy, the diff is saved to .llm_web_data/deploys/.
+    If deploy fails → rollback + crash report written.
+    On next startup, Claude can read the crash report and understand what went wrong.
 """
 
 import argparse
@@ -44,13 +28,18 @@ SERVICE_NAME = "llm-web"
 HEALTH_URL = "http://localhost:8921/health"
 LAST_GOOD_FILE = PROJECT_DIR / ".last_good_commit"
 
+# Data dirs
+DATA_DIR = Path("/workspace/.llm_web_data")
+DEPLOYS_DIR = DATA_DIR / "deploys"
+CRASH_REPORT_FILE = DATA_DIR / "last_crash_report.md"
+
 # Deploy settings
 DEPLOY_HEALTH_RETRIES = 5
 DEPLOY_RETRY_DELAY = 3
 
 # Watchdog settings
-WATCHDOG_INTERVAL = 60        # seconds between checks
-WATCHDOG_FAIL_THRESHOLD = 5   # consecutive failures before rollback (~5 min)
+WATCHDOG_INTERVAL = 60
+WATCHDOG_FAIL_THRESHOLD = 5
 
 
 def log(msg):
@@ -59,12 +48,16 @@ def log(msg):
 
 
 def run(cmd, cwd=PROJECT_DIR):
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
-    return result
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
 
 
 def get_current_commit():
     r = run(["git", "rev-parse", "--short=8", "HEAD"])
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def get_full_commit():
+    r = run(["git", "rev-parse", "HEAD"])
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -80,7 +73,6 @@ def save_last_good_commit(sha):
 
 
 def single_health_check():
-    """Single health check attempt. Returns True if healthy."""
     try:
         req = urllib.request.Request(HEALTH_URL, method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -91,7 +83,6 @@ def single_health_check():
 
 
 def health_check_with_retries(retries=DEPLOY_HEALTH_RETRIES, delay=DEPLOY_RETRY_DELAY):
-    """Multiple health check attempts for deploy mode."""
     for attempt in range(1, retries + 1):
         if single_health_check():
             return True
@@ -111,11 +102,108 @@ def pm2_restart():
 
 
 def rollback_and_restart(target_sha):
-    """Reset to known good commit and restart."""
     log(f"ROLLBACK → git reset --hard {target_sha[:8]}")
     run(["git", "reset", "--hard", target_sha])
     pm2_restart()
     return health_check_with_retries()
+
+
+# ─── BLACK BOX ─────────────────────────────────────────────────
+
+def save_deploy_snapshot(message: str) -> Path:
+    """Save diff + metadata before deploy. Returns snapshot dir."""
+    DEPLOYS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    snap_dir = DEPLOYS_DIR / ts
+    snap_dir.mkdir(exist_ok=True)
+
+    # Staged diff
+    diff_staged = run(["git", "diff", "--cached"])
+    # Unstaged diff
+    diff_unstaged = run(["git", "diff"])
+    # Full status
+    status = run(["git", "status"])
+    # Changed file list
+    files_changed = run(["git", "diff", "--cached", "--name-only"])
+
+    (snap_dir / "message.txt").write_text(message)
+    (snap_dir / "diff_staged.patch").write_text(diff_staged.stdout)
+    (snap_dir / "diff_unstaged.patch").write_text(diff_unstaged.stdout)
+    (snap_dir / "status.txt").write_text(status.stdout)
+    (snap_dir / "files.txt").write_text(files_changed.stdout)
+    (snap_dir / "commit_before.txt").write_text(get_current_commit() or "unknown")
+    (snap_dir / "timestamp.txt").write_text(datetime.now().isoformat())
+
+    log(f"Snapshot saved: {snap_dir.name}")
+    return snap_dir
+
+
+def write_crash_report(snap_dir: Path, last_good: str, failed_commit: str):
+    """Write a crash report that Claude can read on next startup."""
+    message = (snap_dir / "message.txt").read_text() if (snap_dir / "message.txt").exists() else "unknown"
+    diff = (snap_dir / "diff_staged.patch").read_text() if (snap_dir / "diff_staged.patch").exists() else ""
+    files = (snap_dir / "files.txt").read_text().strip() if (snap_dir / "files.txt").exists() else ""
+    ts = datetime.now().isoformat()
+
+    report = f"""# Crash Report — {ts}
+
+## What happened
+Deploy failed and was rolled back automatically.
+
+## What was attempted
+**Message:** {message}
+**Failed commit:** {failed_commit}
+**Rolled back to:** {last_good}
+
+## Files changed
+```
+{files}
+```
+
+## Diff that caused the crash
+```diff
+{diff[:5000]}
+```
+{f'... (truncated, full diff in {snap_dir}/diff_staged.patch)' if len(diff) > 5000 else ''}
+
+## What to do next
+1. Read the diff above to understand what broke
+2. Fix the issue in the code
+3. Deploy again with `python3 safe_deploy.py deploy -m "fix: ..."`
+"""
+
+    CRASH_REPORT_FILE.write_text(report)
+    # Also save in snapshot dir
+    (snap_dir / "CRASH_REPORT.md").write_text(report)
+    (snap_dir / "result.txt").write_text("FAILED")
+    log(f"Crash report written: {CRASH_REPORT_FILE}")
+
+
+def mark_deploy_success(snap_dir: Path, commit: str):
+    """Mark snapshot as successful."""
+    (snap_dir / "result.txt").write_text("SUCCESS")
+    (snap_dir / "commit_after.txt").write_text(commit)
+    # Clear crash report if exists
+    if CRASH_REPORT_FILE.exists():
+        CRASH_REPORT_FILE.unlink()
+
+
+def get_latest_crash_report() -> str | None:
+    if CRASH_REPORT_FILE.exists():
+        return CRASH_REPORT_FILE.read_text()
+    return None
+
+
+def cleanup_old_snapshots(keep=20):
+    """Keep only the last N deploy snapshots."""
+    if not DEPLOYS_DIR.exists():
+        return
+    dirs = sorted(DEPLOYS_DIR.iterdir(), reverse=True)
+    for d in dirs[keep:]:
+        if d.is_dir():
+            for f in d.iterdir():
+                f.unlink()
+            d.rmdir()
 
 
 # ─── DEPLOY MODE ───────────────────────────────────────────────
@@ -125,13 +213,21 @@ def deploy(message):
     log("SAFE DEPLOY")
     log("=" * 50)
 
+    # Check for previous crash report
+    crash = get_latest_crash_report()
+    if crash:
+        log("WARNING: Previous deploy crashed! Report at .llm_web_data/last_crash_report.md")
+
     last_good = get_last_good_commit()
     log(f"Last good: {(last_good or 'none')[:8]}, current: {(get_current_commit() or 'none')}")
 
-    # Commit & push
+    # Stage changes
     run(["git", "add", "-A"])
     status = run(["git", "status", "--porcelain"])
     had_changes = bool(status.stdout.strip())
+
+    # Save black box snapshot BEFORE commit
+    snap_dir = save_deploy_snapshot(message)
 
     if had_changes:
         run(["git", "commit", "-m", message])
@@ -151,13 +247,17 @@ def deploy(message):
     log("Health check...")
     if health_check_with_retries():
         save_last_good_commit(new_commit)
+        mark_deploy_success(snap_dir, new_commit)
+        cleanup_old_snapshots()
         log("DEPLOY SUCCESS")
         return True
     else:
         log("SERVICE DOWN after deploy!")
         if last_good and last_good != new_commit:
+            write_crash_report(snap_dir, last_good, new_commit)
             if rollback_and_restart(last_good):
                 log(f"ROLLBACK SUCCESS → {last_good[:8]}")
+                log("Crash report saved for next session")
             else:
                 log("CRITICAL: Rollback also failed!")
         else:
@@ -201,9 +301,29 @@ def watchdog():
                 log(f"Already on last good commit {current[:8]}, just restarting...")
                 pm2_restart()
             else:
+                # Save crash snapshot for watchdog-triggered rollback
+                DEPLOYS_DIR.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                snap_dir = DEPLOYS_DIR / f"{ts}_watchdog"
+                snap_dir.mkdir(exist_ok=True)
+
+                # Capture diff between last good and current broken code
+                diff = run(["git", "diff", last_good, current])
+                files = run(["git", "diff", "--name-only", last_good, current])
+                commit_log = run(["git", "log", "--oneline", f"{last_good}..{current}"])
+
+                (snap_dir / "message.txt").write_text(f"Watchdog rollback: {current} → {last_good}")
+                (snap_dir / "diff_staged.patch").write_text(diff.stdout)
+                (snap_dir / "files.txt").write_text(files.stdout)
+                (snap_dir / "commits.txt").write_text(commit_log.stdout)
+                (snap_dir / "result.txt").write_text("WATCHDOG_ROLLBACK")
+
+                write_crash_report(snap_dir, last_good, current)
+
                 log(f"Current: {current[:8]} → rolling back to: {last_good[:8]}")
                 if rollback_and_restart(last_good):
                     log("ROLLBACK SUCCESS — service restored")
+                    log("Crash report saved for next session")
                 else:
                     log("CRITICAL: Rollback failed, will retry next cycle")
 
@@ -216,11 +336,12 @@ def main():
     parser = argparse.ArgumentParser(description="Safe deploy & watchdog for llm-web")
     sub = parser.add_subparsers(dest="command")
 
-    deploy_cmd = sub.add_parser("deploy", help="Deploy: commit, restart, health check")
+    deploy_cmd = sub.add_parser("deploy", help="Deploy with black box recording")
     deploy_cmd.add_argument("-m", "--message", default="Auto-deploy: update llm-web")
 
-    sub.add_parser("watchdog", help="Run watchdog: monitor and auto-rollback")
+    sub.add_parser("watchdog", help="Run watchdog with crash reports")
     sub.add_parser("health", help="Single health check")
+    sub.add_parser("crashes", help="Show latest crash report")
 
     args = parser.parse_args()
 
@@ -235,6 +356,12 @@ def main():
         ok = single_health_check()
         print("HEALTHY" if ok else "DOWN")
         sys.exit(0 if ok else 1)
+    elif args.command == "crashes":
+        report = get_latest_crash_report()
+        if report:
+            print(report)
+        else:
+            print("No crash reports.")
     else:
         parser.print_help()
         sys.exit(1)
