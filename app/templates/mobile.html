@@ -37,11 +37,11 @@
         .btn-burger { background: var(--bg3); }
         .btn-burger svg { fill: var(--text); }
 
-        .btn-new { background: var(--ok); }
-        .btn-new svg { fill: var(--bg); }
-
-        .btn-delete { background: var(--bg3); }
-        .btn-delete svg { stroke: var(--accent); fill: none; }
+        .btn-new {
+            width: 40px; height: 40px; border-radius: 50%;
+            background: var(--blue); border: none;
+        }
+        .btn-new svg { fill: #fff; }
 
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
         .status-dot.on { background: var(--ok); }
@@ -73,16 +73,27 @@
             flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
         }
         .drawer-item {
-            padding: 12px 16px; font-size: 15px; color: var(--text);
+            padding: 10px 16px; font-size: 15px; color: var(--text);
             border-bottom: 1px solid var(--border); cursor: pointer;
             display: flex; align-items: center; gap: 8px;
         }
         .drawer-item:active { background: var(--bg3); }
-        .drawer-item.active { color: var(--ok); font-weight: 600; }
+        .drawer-item.active { color: var(--ok); }
         .drawer-item .dot {
             width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex-shrink: 0;
         }
         .drawer-item.active .dot { background: var(--ok); }
+        .drawer-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .drawer-item-actions { display: flex; gap: 4px; flex-shrink: 0; }
+        .drawer-action {
+            width: 30px; height: 30px; border-radius: 6px; border: none;
+            background: transparent; display: flex; align-items: center; justify-content: center;
+            cursor: pointer;
+        }
+        .drawer-action:active { background: var(--bg3); }
+        .drawer-action svg { width: 16px; height: 16px; }
+        .drawer-action.act-rename svg { fill: var(--dim); }
+        .drawer-action.act-delete svg { stroke: var(--accent); fill: none; }
 
         /* --- Terminal output --- */
         .terminal-scroll {
@@ -214,11 +225,6 @@
         <button class="hdr-btn btn-new" onclick="openCreate()">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                 <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
-            </svg>
-        </button>
-        <button class="hdr-btn btn-delete" onclick="deleteSession()">
-            <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M5 6v14a2 2 0 002 2h10a2 2 0 002-2V6"/><path d="M10 11v6"/><path d="M14 11v6"/>
             </svg>
         </button>
     </div>
@@ -449,16 +455,63 @@ function switchSession(id) {
     closeDrawer();
 }
 function updateSessionName() {
-    document.getElementById('sessionName').textContent = currentSession || '-- нет сессий --';
+    const name = currentSession ? (sessionNames[currentSession] || currentSession) : '-- нет сессий --';
+    document.getElementById('sessionName').textContent = name;
 }
 function updateDrawerList() {
     const list = document.getElementById('drawerList');
     const items = Array.from(selectEl.options).filter(o => o.value);
-    list.innerHTML = items.map(o =>
-        `<div class="drawer-item${o.value === currentSession ? ' active' : ''}" onclick="switchSession('${o.value}')">
-            <span class="dot"></span>${o.value}
-        </div>`
-    ).join('');
+    list.innerHTML = items.map(o => {
+        const active = o.value === currentSession ? ' active' : '';
+        const name = sessionNames[o.value] || o.value;
+        return `<div class="drawer-item${active}">
+            <span class="dot"></span>
+            <span class="drawer-item-name" onclick="switchSession('${o.value}')">${name}</span>
+            <div class="drawer-item-actions">
+                <button class="drawer-action act-rename" onclick="event.stopPropagation(); renameSession('${o.value}')">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                </button>
+                <button class="drawer-action act-delete" onclick="event.stopPropagation(); deleteSessionById('${o.value}')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M5 6v14a2 2 0 002 2h10a2 2 0 002-2V6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+                    </svg>
+                </button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// Session display names (local only)
+let sessionNames = JSON.parse(localStorage.getItem('sessionNames') || '{}');
+function saveSessionNames() { localStorage.setItem('sessionNames', JSON.stringify(sessionNames)); }
+
+function renameSession(id) {
+    const current = sessionNames[id] || id;
+    const name = prompt('Название сессии:', current);
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (trimmed && trimmed !== id) {
+        sessionNames[id] = trimmed;
+    } else {
+        delete sessionNames[id];
+    }
+    saveSessionNames();
+    updateSessionName();
+    updateDrawerList();
+}
+
+async function deleteSessionById(id) {
+    if (!confirm(`Удалить "${sessionNames[id] || id}"?`)) return;
+    if (id === currentSession) {
+        stopPolling();
+        currentSession = null;
+        outputEl.innerHTML = '';
+    }
+    await fetch(`${API}/sessions/${id}`, { method: 'DELETE' });
+    delete sessionNames[id];
+    saveSessionNames();
+    await loadSessions();
+    closeDrawer();
 }
 
 // --- Sessions ---
@@ -498,13 +551,7 @@ async function loadSessions() {
 
 async function deleteSession() {
     if (!currentSession) return;
-    if (!confirm(`Удалить "${currentSession}"?`)) return;
-    stopPolling();
-    await fetch(`${API}/sessions/${currentSession}`, { method: 'DELETE' });
-    currentSession = null;
-    outputEl.innerHTML = '';
-    updateSessionName();
-    await loadSessions();
+    deleteSessionById(currentSession);
 }
 
 // --- Create session ---
