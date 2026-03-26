@@ -396,6 +396,13 @@ async def change_password(request: Request, payload: ChangePasswordRequest):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    resp = templates.TemplateResponse(request, "mobile.html")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.get("/desktop", response_class=HTMLResponse)
+def desktop(request: Request):
     resp = templates.TemplateResponse(request, "index.html")
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
