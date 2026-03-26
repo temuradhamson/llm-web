@@ -41,12 +41,15 @@ last_narrate_time = 0.0
 
 
 def get_session_output() -> str:
-    """Read current terminal output via API."""
+    """Read current terminal output directly from tmux."""
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(f"{BASE_URL}/sessions/{SESSION_ID}/tail?full=true")
-            if resp.status_code == 200:
-                return resp.json().get("output", "")
+        target = f"agent-{SESSION_ID}:0.0"
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", target, "-S", "-"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout
     except Exception:
         pass
     return ""
