@@ -49,8 +49,8 @@ DEPLOY_HEALTH_RETRIES = 5
 DEPLOY_RETRY_DELAY = 3
 
 # Watchdog settings
-WATCHDOG_INTERVAL = 30        # seconds between checks
-WATCHDOG_FAIL_THRESHOLD = 3   # consecutive failures before rollback
+WATCHDOG_INTERVAL = 60        # seconds between checks
+WATCHDOG_FAIL_THRESHOLD = 5   # consecutive failures before rollback (~5 min)
 
 
 def log(msg):
