@@ -77,6 +77,12 @@ def is_noise(line: str) -> bool:
     t = line.strip()
     if not t or len(t) < 5:
         return True
+    # Claude Code UI elements (tool calls, status lines)
+    if re.search(r'[●○◐◑◒◓⏵⏸✓✗✻⎿╭╮╰╯│├└─]', t):
+        return True
+    # Running/timeout/token indicators
+    if re.search(r'Running|timeout|tokens|Brewing|bypass permissions', t, re.IGNORECASE):
+        return True
     # Indented code
     if re.match(r'^\s{4,}\S', line):
         return True
@@ -94,6 +100,9 @@ def is_noise(line: str) -> bool:
     if re.match(r'^[\/~][a-zA-Z0-9_\/.]+$', t):
         return True
     if re.match(r'^\$ ', t):
+        return True
+    # Tool call headers (Read, Write, Edit, Bash, Glob, Grep, etc.)
+    if re.match(r'^(Read|Write|Edit|Bash|Glob|Grep|Agent|Skill)\(', t):
         return True
     # Pure symbols
     if not re.search(r'[а-яА-ЯёЁa-zA-Z]{2,}', t):
@@ -113,12 +122,16 @@ def extract_meaningful_text(new_text: str) -> str:
 def narrate_with_claude(text: str) -> str:
     """Use Claude CLI to generate a brief narration of the text."""
     prompt = (
-        "Ты — Ксения, голосовой рассказчик. Тебе дан фрагмент вывода AI-ассистента из терминала. "
-        "Перескажи КРАТКО (1-3 предложения) суть того, что происходит, от первого лица женского рода. "
-        "Говори естественно, как будто комментируешь вслух. Не повторяй текст дословно. "
-        "Если это код или техническая команда — опиши суть действия. "
-        "Отвечай ТОЛЬКО текстом для озвучки, без markdown.\n\n"
-        f"Фрагмент:\n{text[:1500]}"
+        "Ты — Ксения, голосовой рассказчик для AI-терминала. "
+        "Тебе дан фрагмент нового вывода из терминала, где работает AI-ассистент.\n\n"
+        "ПРАВИЛА:\n"
+        "- Если фрагмент содержит ЖИВУЮ РЕЧЬ ассистента (объяснения, ответы, рассуждения) — "
+        "перескажи КРАТКО (1-3 предложения) от первого лица женского рода. Говори естественно.\n"
+        "- Если фрагмент содержит ТОЛЬКО технический мусор (команды терминала, вывод инструментов, "
+        "код, логи, статус-строки, пути к файлам) — ответь ОДНИМ словом: SKIP\n"
+        "- НЕ озвучивай сообщения пользователя — только ответы ассистента.\n"
+        "- Отвечай ТОЛЬКО текстом для озвучки (без markdown, без кавычек) или словом SKIP.\n\n"
+        f"Фрагмент:\n{text[:2000]}"
     )
 
     try:
@@ -203,7 +216,8 @@ def main():
 
         # Generate narration with Claude
         narration = narrate_with_claude(meaningful)
-        if not narration:
+        if not narration or narration.strip().upper() == "SKIP":
+            print(f"[NARRATOR] Skipped (no speech content)")
             continue
 
         print(f"[NARRATOR] Narration: {narration[:100]}...")
