@@ -77,11 +77,11 @@ def is_noise(line: str) -> bool:
     t = line.strip()
     if not t or len(t) < 5:
         return True
-    # Claude Code UI elements (tool calls, status lines)
-    if re.search(r'[●○◐◑◒◓⏵⏸✓✗✻⎿╭╮╰╯│├└─]', t):
+    # Claude Code UI elements (tool calls, status lines, spinners)
+    if re.search(r'[●○◐◑◒◓⏵⏸✓✗✻✽✾✿⎿╭╮╰╯│├└─❯❮▸▹►]', t):
         return True
-    # Running/timeout/token indicators
-    if re.search(r'Running|timeout|tokens|Brewing|bypass permissions', t, re.IGNORECASE):
+    # Running/timeout/token/status indicators
+    if re.search(r'Running|timeout|tokens|Brewing|Befuddling|bypass permissions|Auto-update|shift\+t', t, re.IGNORECASE):
         return True
     # Indented code
     if re.match(r'^\s{4,}\S', line):
