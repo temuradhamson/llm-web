@@ -87,7 +87,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         # Allow public paths, static, and websocket (ws auth checked separately)
-        if path in PUBLIC_PATHS or path.startswith("/ws/") or path.endswith("/push"):
+        if path in PUBLIC_PATHS or path.startswith("/ws/") or path.endswith("/push") or path == "/narrator/hook":
             return await call_next(request)
 
         user = get_user_from_request(request)
@@ -871,8 +871,12 @@ class NarratorHookPayload(BaseModel):
 
 
 @app.post("/narrator/hook")
-async def narrator_hook(payload: NarratorHookPayload):
+async def narrator_hook(payload: NarratorHookPayload, request: Request):
     """Called by Claude Stop hook — receives assistant response text, generates TTS."""
+    # Only allow from localhost
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="localhost only")
     text = payload.text.strip()
     if not text or len(text) < 20:
         return {"ok": False, "detail": "text too short"}
