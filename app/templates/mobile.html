@@ -692,7 +692,7 @@ async function sendInput() {
     inputEl.style.height = 'auto';
     document.getElementById('inputWrap').classList.remove('has-voice');
     autoScroll = true;
-    voiceCooldown(); // don't voice user's own message echo
+    voiceCooldown(text); // don't voice user's own message echo
 
     await fetch(`${API}/sessions/${currentSession}/send`, {
         method: 'POST',
@@ -842,6 +842,7 @@ let currentTTSBtn = null;
 let autoVoice = localStorage.getItem('autoVoice') === 'true';
 let lastVoicedOutput = '';
 let voiceCooldownUntil = 0;  // timestamp: don't voice until this time (skip user echo)
+let lastSentTexts = [];      // recent user messages to filter from voice output
 let pendingVoiceBuffer = ''; // accumulates text until sentence boundary
 let ttsQueue = [];
 let ttsPlaying = false;
@@ -906,10 +907,16 @@ async function voicePoll() {
 }
 
 // Mark cooldown when user sends a message (skip echo)
-function voiceCooldown() {
-    voiceCooldownUntil = Date.now() + 3000;
+function voiceCooldown(sentText) {
+    voiceCooldownUntil = Date.now() + 4000;
     lastVoicedOutput = lastOutput;
     pendingVoiceBuffer = '';
+    // Remember sent text to filter it from voice output
+    if (sentText) {
+        lastSentTexts.push(sentText.toLowerCase().trim());
+        // Keep only last 5
+        if (lastSentTexts.length > 5) lastSentTexts.shift();
+    }
 }
 
 // Strip ANSI codes and markdown formatting for TTS
@@ -981,12 +988,27 @@ function processAutoVoice(raw) {
     const clean = stripForTTS(newPart);
     const lines = clean.split('\n');
 
-    // Keep non-noise lines
+    // Keep non-noise lines, skip user message echoes
     const good = [];
     for (const line of lines) {
-        if (!isNoise(line)) {
-            good.push(line.trim());
+        if (isNoise(line)) continue;
+        const trimmed = line.trim();
+        // Check if this line matches any recently sent user message
+        const lower = trimmed.toLowerCase();
+        let isUserEcho = false;
+        for (const sent of lastSentTexts) {
+            // Match if line contains significant portion of sent text or vice versa
+            if (sent.length > 10 && (lower.includes(sent.substring(0, 30)) || sent.includes(lower.substring(0, 30)))) {
+                isUserEcho = true;
+                break;
+            }
+            if (sent.length <= 10 && lower === sent) {
+                isUserEcho = true;
+                break;
+            }
         }
+        if (isUserEcho) continue;
+        good.push(trimmed);
     }
     if (good.length === 0) return;
 
