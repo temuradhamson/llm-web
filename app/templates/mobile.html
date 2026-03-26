@@ -125,6 +125,19 @@
         .mic-status {
             font-size: 12px; color: var(--dim); padding: 4px 0 2px;
         }
+
+        /* Floating scroll-to-bottom button */
+        .fab-down {
+            position: absolute; right: 14px; bottom: 14px; z-index: 5;
+            width: 40px; height: 40px; border-radius: 50%;
+            background: var(--bg2); border: 1px solid var(--border);
+            display: none; align-items: center; justify-content: center;
+            cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+            transition: opacity .2s, transform .2s;
+        }
+        .fab-down.show { display: flex; }
+        .fab-down:active { transform: scale(0.9); }
+        .fab-down svg { width: 20px; height: 20px; fill: var(--dim); }
     </style>
 </head>
 <body>
@@ -135,11 +148,17 @@
     <select id="sessionSelect"><option value="">-- нет сессий --</option></select>
     <button onclick="openCreate()">+</button>
     <button class="secondary" onclick="deleteSession()">Del</button>
-    <button class="secondary" onclick="scrollToBottom()">&#8595;</button>
 </div>
 
 <!-- Terminal output (scrollable) -->
-<div class="terminal-scroll" id="output"></div>
+<div style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column;">
+    <div class="terminal-scroll" id="output"></div>
+    <button class="fab-down" id="fabDown" onclick="scrollToBottom(); autoScroll=true;">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"/>
+        </svg>
+    </button>
+</div>
 
 <!-- Input area -->
 <div class="input-area">
@@ -322,10 +341,13 @@ function scrollToBottom() {
     outputEl.scrollTop = outputEl.scrollHeight;
 }
 
-// Track if user scrolled up manually
+// Track if user scrolled up manually + show/hide FAB
+const fabDown = document.getElementById('fabDown');
 outputEl.addEventListener('scroll', () => {
     const atBottom = outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 30;
+    const scrolledUp = outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight > outputEl.clientHeight;
     autoScroll = atBottom;
+    fabDown.classList.toggle('show', scrolledUp && !atBottom);
 });
 
 // --- Sessions ---
