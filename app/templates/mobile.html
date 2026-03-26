@@ -829,14 +829,13 @@ async function playTTS(text, btn) {
             body: JSON.stringify({ text }),
         });
         if (!res.ok) { btn.classList.remove('playing'); currentTTSBtn = null; return; }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        currentAudio = new Audio(url);
+        const data = await res.json();
+        if (!data.url) { btn.classList.remove('playing'); currentTTSBtn = null; return; }
+        currentAudio = new Audio(data.url);
         currentAudio.onended = () => {
             btn.classList.remove('playing');
             currentTTSBtn = null;
             currentAudio = null;
-            URL.revokeObjectURL(url);
         };
         currentAudio.onerror = () => {
             btn.classList.remove('playing');

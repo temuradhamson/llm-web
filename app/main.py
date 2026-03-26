@@ -762,11 +762,8 @@ async def tts(payload: TTSRequest):
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"TTS error: {resp.text[:200]}")
 
-    return Response(
-        content=resp.content,
-        media_type="audio/wav",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    data = resp.json()
+    return {"ok": True, "url": data.get("url", "")}
 
 
 # --- SSL Certificate download (for iOS mic fix) ---
