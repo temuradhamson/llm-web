@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
 """
-Safe deploy script for llm-web.
+Safe deploy & watchdog for llm-web.
 
-Usage:
-    python3 safe_deploy.py                # commit, restart, health check, rollback if broken
-    python3 safe_deploy.py --message "fix bug"  # custom commit message
-    python3 safe_deploy.py --check-only   # just health check, no deploy
+Modes:
+    python3 safe_deploy.py deploy -m "msg"   Deploy: commit, restart, health check, rollback if broken
+    python3 safe_deploy.py watchdog           Watchdog: monitor health every 30s, auto-rollback on failure
+    python3 safe_deploy.py health             Just check if service is alive
 
-Algorithm:
-    1. Save current working commit hash as "last known good"
-    2. Stage & commit all changes
-    3. Push to GitHub
-    4. Restart service via PM2
-    5. Wait for health check (port 8921)
-    6. If healthy → done, new commit is the "last known good"
-    7. If NOT healthy → git reset to last good commit, restart again
+How watchdog works:
+    - Runs as a separate PM2 process (llm-web-watchdog)
+    - Every 30 seconds checks GET /health
+    - If 3 consecutive checks fail (~90 seconds of downtime):
+        1. Reads .last_good_commit
+        2. git reset --hard to that commit
+        3. Restarts llm-web via PM2
+        4. Verifies recovery
+    - Logs everything to stdout (visible via pm2 logs llm-web-watchdog)
+
+Timeline of self-healing:
+    0s    — bad code deployed, service crashes
+    0-30s — PM2 autorestart tries to bring it back (will fail if code is broken)
+    30s   — watchdog detects first failure
+    60s   — watchdog detects second failure
+    90s   — watchdog detects third failure → ROLLBACK triggered
+    95s   — git reset --hard to last good commit
+    98s   — PM2 restart with good code
+    ~100s — service is back online
+
+    Worst case: ~100 seconds of downtime.
 """
 
 import argparse
@@ -23,30 +36,35 @@ import sys
 import time
 import urllib.request
 import json
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_DIR = Path("/mnt/c/Users/xtech/Projects/llm_web")
 SERVICE_NAME = "llm-web"
 HEALTH_URL = "http://localhost:8921/health"
-HEALTH_TIMEOUT = 15  # seconds to wait for service
-HEALTH_RETRIES = 5   # number of retries
 LAST_GOOD_FILE = PROJECT_DIR / ".last_good_commit"
 
+# Deploy settings
+DEPLOY_HEALTH_RETRIES = 5
+DEPLOY_RETRY_DELAY = 3
 
-def run(cmd, cwd=PROJECT_DIR, check=True):
-    """Run a shell command and return output."""
-    result = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, check=False
-    )
-    if check and result.returncode != 0:
-        print(f"  WARN: {' '.join(cmd)} → exit {result.returncode}")
-        if result.stderr.strip():
-            print(f"  stderr: {result.stderr.strip()}")
+# Watchdog settings
+WATCHDOG_INTERVAL = 30        # seconds between checks
+WATCHDOG_FAIL_THRESHOLD = 3   # consecutive failures before rollback
+
+
+def log(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
+def run(cmd, cwd=PROJECT_DIR):
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
     return result
 
 
 def get_current_commit():
-    r = run(["git", "rev-parse", "HEAD"])
+    r = run(["git", "rev-parse", "--short=8", "HEAD"])
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -58,137 +76,168 @@ def get_last_good_commit():
 
 def save_last_good_commit(sha):
     LAST_GOOD_FILE.write_text(sha + "\n")
+    log(f"Saved {sha[:8]} as last known good")
 
 
-def health_check():
-    """Check if the service is healthy."""
-    for attempt in range(1, HEALTH_RETRIES + 1):
-        try:
-            req = urllib.request.Request(HEALTH_URL, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-                if data.get("ok"):
-                    return True
-        except Exception:
-            pass
-        if attempt < HEALTH_RETRIES:
-            print(f"  Health check {attempt}/{HEALTH_RETRIES} failed, retrying in {HEALTH_TIMEOUT // HEALTH_RETRIES}s...")
-            time.sleep(HEALTH_TIMEOUT // HEALTH_RETRIES)
+def single_health_check():
+    """Single health check attempt. Returns True if healthy."""
+    try:
+        req = urllib.request.Request(HEALTH_URL, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            return data.get("ok", False)
+    except Exception:
+        return False
+
+
+def health_check_with_retries(retries=DEPLOY_HEALTH_RETRIES, delay=DEPLOY_RETRY_DELAY):
+    """Multiple health check attempts for deploy mode."""
+    for attempt in range(1, retries + 1):
+        if single_health_check():
+            return True
+        if attempt < retries:
+            log(f"Health check {attempt}/{retries} failed, retry in {delay}s...")
+            time.sleep(delay)
     return False
 
 
 def pm2_restart():
-    """Stop and start the service."""
-    print("  Stopping service...")
-    run(["pm2", "stop", SERVICE_NAME], check=False)
+    log(f"Stopping {SERVICE_NAME}...")
+    run(["pm2", "stop", SERVICE_NAME])
     time.sleep(1)
-    print("  Starting service...")
-    run(["pm2", "start", SERVICE_NAME], check=False)
+    log(f"Starting {SERVICE_NAME}...")
+    run(["pm2", "start", SERVICE_NAME])
     time.sleep(2)
 
 
-def git_commit_and_push(message):
-    """Stage all changes, commit, and push."""
-    run(["git", "add", "-A"])
-
-    # Check if there's anything to commit
-    status = run(["git", "status", "--porcelain"])
-    if not status.stdout.strip():
-        print("  No changes to commit.")
-        return False
-
-    run(["git", "commit", "-m", message])
-    print("  Pushing to GitHub...")
-    push = run(["git", "push", "origin", "main"], check=False)
-    if push.returncode != 0:
-        print("  Push failed (non-fatal, will continue)")
-    return True
-
-
-def rollback(target_sha):
-    """Reset to a known good commit."""
-    print(f"  Rolling back to {target_sha[:8]}...")
+def rollback_and_restart(target_sha):
+    """Reset to known good commit and restart."""
+    log(f"ROLLBACK → git reset --hard {target_sha[:8]}")
     run(["git", "reset", "--hard", target_sha])
+    pm2_restart()
+    return health_check_with_retries()
 
 
-def deploy(message="Auto-deploy: update llm-web"):
-    print("=" * 50)
-    print("SAFE DEPLOY — llm-web")
-    print("=" * 50)
+# ─── DEPLOY MODE ───────────────────────────────────────────────
 
-    # Step 1: Save last known good
+def deploy(message):
+    log("=" * 50)
+    log("SAFE DEPLOY")
+    log("=" * 50)
+
     last_good = get_last_good_commit()
-    current = get_current_commit()
-    print(f"\n[1/6] Last good commit: {(last_good or 'none')[:8]}")
-    print(f"       Current commit:  {(current or 'none')[:8]}")
+    log(f"Last good: {(last_good or 'none')[:8]}, current: {(get_current_commit() or 'none')}")
 
-    # Step 2: Commit changes
-    print(f"\n[2/6] Committing changes...")
-    had_changes = git_commit_and_push(message)
-    new_commit = get_current_commit()
+    # Commit & push
+    run(["git", "add", "-A"])
+    status = run(["git", "status", "--porcelain"])
+    had_changes = bool(status.stdout.strip())
 
     if had_changes:
-        print(f"       New commit: {new_commit[:8]}")
+        run(["git", "commit", "-m", message])
+        push = run(["git", "push", "origin", "main"])
+        if push.returncode != 0:
+            log("Push failed (non-fatal)")
+        log(f"Committed: {get_current_commit()}")
     else:
-        print("       No new changes, restarting with current code.")
+        log("No changes to commit")
 
-    # Step 3: Restart
-    print(f"\n[3/6] Restarting {SERVICE_NAME}...")
+    new_commit = get_current_commit()
+
+    # Restart
     pm2_restart()
 
-    # Step 4: Health check
-    print(f"\n[4/6] Health check...")
-    healthy = health_check()
-
-    if healthy:
-        # Step 5: Success
-        print(f"\n[5/6] Service is HEALTHY!")
+    # Health check
+    log("Health check...")
+    if health_check_with_retries():
         save_last_good_commit(new_commit)
-        print(f"[6/6] Saved {new_commit[:8]} as last known good.")
-        print(f"\n{'=' * 50}")
-        print("DEPLOY SUCCESS")
-        print(f"{'=' * 50}")
+        log("DEPLOY SUCCESS")
         return True
     else:
-        # Step 5: Rollback
-        print(f"\n[5/6] Service is DOWN! Rolling back...")
+        log("SERVICE DOWN after deploy!")
         if last_good and last_good != new_commit:
-            rollback(last_good)
-            print(f"\n[6/6] Restarting with last good code...")
-            pm2_restart()
-
-            # Verify rollback worked
-            if health_check():
-                print(f"\n{'=' * 50}")
-                print(f"ROLLBACK SUCCESS — reverted to {last_good[:8]}")
-                print(f"{'=' * 50}")
+            if rollback_and_restart(last_good):
+                log(f"ROLLBACK SUCCESS → {last_good[:8]}")
             else:
-                print(f"\n{'=' * 50}")
-                print("CRITICAL: Rollback also failed!")
-                print(f"{'=' * 50}")
+                log("CRITICAL: Rollback also failed!")
         else:
-            print("  No previous good commit to rollback to!")
-            print(f"\n{'=' * 50}")
-            print("DEPLOY FAILED — manual intervention needed")
-            print(f"{'=' * 50}")
+            log("No previous good commit to rollback to")
         return False
 
 
+# ─── WATCHDOG MODE ─────────────────────────────────────────────
+
+def watchdog():
+    log("=" * 50)
+    log("WATCHDOG STARTED")
+    log(f"Checking every {WATCHDOG_INTERVAL}s, rollback after {WATCHDOG_FAIL_THRESHOLD} failures")
+    log(f"Last good commit: {(get_last_good_commit() or 'none')[:8]}")
+    log("=" * 50)
+
+    consecutive_failures = 0
+
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+
+        if single_health_check():
+            if consecutive_failures > 0:
+                log(f"Service recovered (was failing for {consecutive_failures} checks)")
+                consecutive_failures = 0
+            continue
+
+        consecutive_failures += 1
+        log(f"Health check FAILED ({consecutive_failures}/{WATCHDOG_FAIL_THRESHOLD})")
+
+        if consecutive_failures >= WATCHDOG_FAIL_THRESHOLD:
+            log("THRESHOLD REACHED — initiating rollback")
+
+            last_good = get_last_good_commit()
+            current = get_current_commit()
+
+            if not last_good:
+                log("No last good commit found, just restarting...")
+                pm2_restart()
+            elif last_good == current:
+                log(f"Already on last good commit {current[:8]}, just restarting...")
+                pm2_restart()
+            else:
+                log(f"Current: {current[:8]} → rolling back to: {last_good[:8]}")
+                if rollback_and_restart(last_good):
+                    log("ROLLBACK SUCCESS — service restored")
+                else:
+                    log("CRITICAL: Rollback failed, will retry next cycle")
+
+            consecutive_failures = 0
+
+
+# ─── MAIN ──────────────────────────────────────────────────────
+
 def main():
-    parser = argparse.ArgumentParser(description="Safe deploy for llm-web")
-    parser.add_argument("-m", "--message", default="Auto-deploy: update llm-web",
-                        help="Commit message")
-    parser.add_argument("--check-only", action="store_true",
-                        help="Only run health check")
+    parser = argparse.ArgumentParser(description="Safe deploy & watchdog for llm-web")
+    sub = parser.add_subparsers(dest="command")
+
+    deploy_cmd = sub.add_parser("deploy", help="Deploy: commit, restart, health check")
+    deploy_cmd.add_argument("-m", "--message", default="Auto-deploy: update llm-web")
+
+    sub.add_parser("watchdog", help="Run watchdog: monitor and auto-rollback")
+    sub.add_parser("health", help="Single health check")
+
     args = parser.parse_args()
 
-    if args.check_only:
-        ok = health_check()
+    if args.command == "deploy":
+        sys.exit(0 if deploy(args.message) else 1)
+    elif args.command == "watchdog":
+        try:
+            watchdog()
+        except KeyboardInterrupt:
+            log("Watchdog stopped")
+    elif args.command == "health":
+        ok = single_health_check()
         print("HEALTHY" if ok else "DOWN")
         sys.exit(0 if ok else 1)
-
-    success = deploy(args.message)
-    sys.exit(0 if success else 1)
+    else:
+        parser.print_help()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
