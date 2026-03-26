@@ -811,24 +811,36 @@ async function toggleMic() {
 let narratorEnabled = localStorage.getItem('narrator') === 'true';
 let narratorAudio = null;
 let narratorPollTimer = null;
+let audioUnlocked = false; // iOS requires user gesture to unlock audio
+
+// Unlock audio context on first user interaction
+function unlockAudio() {
+    if (audioUnlocked) return;
+    const a = new Audio();
+    a.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+    a.play().then(() => { audioUnlocked = true; }).catch(() => {});
+    a.pause();
+    audioUnlocked = true;
+}
+document.addEventListener('touchstart', unlockAudio, { once: true });
+document.addEventListener('click', unlockAudio, { once: true });
 
 setTimeout(() => {
     if (narratorEnabled) {
         document.getElementById('narratorBtn').classList.add('active');
         startNarratorPolling();
-        // Also launch the narrator process on server
         if (currentSession) enableNarrator(currentSession);
     }
 }, 500);
 
 function toggleNarrator() {
+    unlockAudio(); // unlock on explicit user gesture
     narratorEnabled = !narratorEnabled;
     localStorage.setItem('narrator', narratorEnabled);
     const btn = document.getElementById('narratorBtn');
     btn.classList.toggle('active', narratorEnabled);
 
     if (narratorEnabled) {
-        // Enable narrator on server for current session
         if (currentSession) enableNarrator(currentSession);
         startNarratorPolling();
     } else {
@@ -866,21 +878,27 @@ async function pollNarrator() {
         const data = await res.json();
         if (!data.url) return;
 
+        console.log('[Narrator] Playing:', data.url);
         const btn = document.getElementById('narratorBtn');
         btn.classList.add('speaking');
         narratorAudio = new Audio(data.url);
         narratorAudio.onended = () => {
+            console.log('[Narrator] Playback ended');
             btn.classList.remove('speaking');
             narratorAudio = null;
         };
-        narratorAudio.onerror = () => {
+        narratorAudio.onerror = (e) => {
+            console.error('[Narrator] Audio error:', e);
             btn.classList.remove('speaking');
             narratorAudio = null;
         };
-        await narratorAudio.play().catch(() => {
+        try {
+            await narratorAudio.play();
+        } catch (e) {
+            console.error('[Narrator] Play failed:', e);
             btn.classList.remove('speaking');
             narratorAudio = null;
-        });
+        }
     } catch {}
 }
 
