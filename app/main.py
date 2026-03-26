@@ -868,6 +868,7 @@ async def narrator_next(session_id: str):
 class NarratorHookPayload(BaseModel):
     text: str
     claude_session_id: str = ""
+    brief: bool = False  # True for real-time tool updates (skip summarize)
 
 
 @app.post("/narrator/hook")
@@ -886,13 +887,17 @@ async def narrator_hook(payload: NarratorHookPayload, request: Request):
     if not enabled_sessions:
         return {"ok": False, "detail": "no narrator sessions enabled"}
 
-    # Summarize text for speech
-    summary = _narrator_summarize(text)
-    if not summary or len(summary) < 10:
-        print(f"[NARRATOR] Hook: text too short after summarize ({len(summary)} chars)")
-        return {"ok": False, "detail": "summary too short"}
-
-    print(f"[NARRATOR] Hook: summarized to {len(summary)} chars: {summary[:100]}...")
+    # Brief updates (from PostToolUse) skip summarization — already short and ready
+    if payload.brief:
+        summary = text
+        print(f"[NARRATOR] Brief: {summary}")
+    else:
+        # Summarize long text for speech (Stop hook)
+        summary = _narrator_summarize(text)
+        if not summary or len(summary) < 10:
+            print(f"[NARRATOR] Hook: text too short after summarize ({len(summary)} chars)")
+            return {"ok": False, "detail": "summary too short"}
+        print(f"[NARRATOR] Summary: {len(summary)} chars: {summary[:100]}...")
 
     # Send to TTS API
     try:
