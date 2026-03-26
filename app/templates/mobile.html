@@ -434,14 +434,42 @@ outputEl.addEventListener('scroll', () => {
 });
 
 // --- Drawer ---
+function openDrawer() {
+    document.getElementById('drawer').classList.add('open');
+    document.getElementById('drawerOverlay').classList.add('open');
+}
 function toggleDrawer() {
-    document.getElementById('drawer').classList.toggle('open');
-    document.getElementById('drawerOverlay').classList.toggle('open');
+    const isOpen = document.getElementById('drawer').classList.contains('open');
+    isOpen ? closeDrawer() : openDrawer();
 }
 function closeDrawer() {
     document.getElementById('drawer').classList.remove('open');
     document.getElementById('drawerOverlay').classList.remove('open');
 }
+
+// Swipe left→right to open drawer
+(function() {
+    let startX = null, startY = null;
+    document.addEventListener('touchstart', (e) => {
+        const t = e.touches[0];
+        // Only detect swipes starting from left edge (< 30px)
+        if (t.clientX < 30) {
+            startX = t.clientX;
+            startY = t.clientY;
+        }
+    }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+        if (startX === null) return;
+        const dx = e.touches[0].clientX - startX;
+        const dy = Math.abs(e.touches[0].clientY - startY);
+        // Horizontal swipe > 60px, and mostly horizontal (not vertical scroll)
+        if (dx > 60 && dy < 50) {
+            openDrawer();
+            startX = null;
+        }
+    }, { passive: true });
+    document.addEventListener('touchend', () => { startX = null; }, { passive: true });
+})();
 function switchSession(id) {
     if (id === currentSession) { closeDrawer(); return; }
     currentSession = id;
