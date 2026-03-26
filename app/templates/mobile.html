@@ -74,34 +74,53 @@
             padding: 8px 10px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
         }
         .input-row { display: flex; gap: 8px; align-items: flex-end; }
-        .input-area textarea {
-            flex: 1; background: var(--bg3); color: var(--text); border: 1px solid var(--border);
-            border-radius: 12px; padding: 10px 12px; font-size: 15px; font-family: inherit;
+
+        /* Textarea wrapper with inline buttons */
+        .input-wrap {
+            flex: 1; position: relative; display: flex; align-items: flex-end;
+            background: var(--bg3); border: 1px solid var(--border); border-radius: 12px;
+            transition: border-color .2s;
+        }
+        .input-wrap:focus-within { border-color: var(--accent); }
+        .input-wrap.has-voice { border-color: var(--ok); }
+
+        .input-wrap textarea {
+            flex: 1; background: transparent; color: var(--text); border: none;
+            padding: 10px 12px; padding-right: 76px; font-size: 15px; font-family: inherit;
             resize: none; outline: none; min-height: 44px; max-height: 120px;
             line-height: 1.4;
         }
-        .input-area textarea:focus { border-color: var(--accent); }
-        .input-area textarea.has-voice { border-color: var(--ok); }
 
-        .input-btn {
-            width: 44px; height: 44px; border-radius: 50%; border: none;
-            display: flex; align-items: center; justify-content: center;
-            flex-shrink: 0; cursor: pointer; transition: transform .1s, opacity .1s;
+        /* Inline buttons inside textarea */
+        .inline-btns {
+            position: absolute; right: 6px; bottom: 6px;
+            display: flex; gap: 4px; align-items: center;
         }
-        .input-btn:active { transform: scale(0.9); opacity: 0.8; }
-        .input-btn svg { width: 22px; height: 22px; }
+        .inline-btn {
+            width: 32px; height: 32px; border-radius: 50%; border: none;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; transition: transform .1s, opacity .1s;
+        }
+        .inline-btn:active { transform: scale(0.85); opacity: 0.7; }
+        .inline-btn svg { width: 18px; height: 18px; }
 
-        .btn-mic { background: var(--bg3); border: 2px solid var(--blue); }
+        .btn-clear { background: transparent; }
+        .btn-clear svg { stroke: var(--dim); }
+
+        .btn-mic { background: transparent; }
         .btn-mic svg { fill: var(--blue); }
-        .btn-mic.recording { background: var(--accent); border-color: var(--accent); animation: pulse 1.5s infinite; }
+        .btn-mic.recording { background: var(--accent); animation: pulse 1.5s infinite; }
         .btn-mic.recording svg { fill: #fff; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
 
-        .btn-clear { background: var(--bg3); border: 2px solid var(--dim); }
-        .btn-clear svg { stroke: var(--dim); }
-
-        .btn-send { background: var(--ok); border: 2px solid var(--ok); }
-        .btn-send svg { fill: var(--bg); }
+        /* Send button (outside, right) */
+        .btn-send {
+            width: 44px; height: 44px; border-radius: 50%; border: none;
+            background: var(--ok); display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; cursor: pointer; transition: transform .1s, opacity .1s;
+        }
+        .btn-send:active { transform: scale(0.9); opacity: 0.8; }
+        .btn-send svg { width: 22px; height: 22px; fill: var(--bg); }
 
         .mic-status {
             font-size: 12px; color: var(--dim); padding: 4px 0 2px;
@@ -126,21 +145,25 @@
 <div class="input-area">
     <div class="mic-status" id="micStatus"></div>
     <div class="input-row">
-        <button class="input-btn btn-send" onclick="sendInput()">
+        <div class="input-wrap" id="inputWrap">
+            <textarea id="inputText" rows="1" placeholder="Введите или надиктуйте..." enterkeyhint="send"></textarea>
+            <div class="inline-btns">
+                <button class="inline-btn btn-clear" id="btnClear" onclick="clearInput()" style="display:none;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" xmlns="http://www.w3.org/2000/svg">
+                        <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+                    </svg>
+                </button>
+                <button class="inline-btn btn-mic" id="micBtn" onclick="toggleMic()">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <button class="btn-send" onclick="sendInput()">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                 <path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/>
-            </svg>
-        </button>
-        <textarea id="inputText" rows="1" placeholder="Введите или надиктуйте текст..." enterkeyhint="send"></textarea>
-        <button class="input-btn btn-clear" id="btnClear" onclick="clearInput()" style="display:none;">
-            <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" xmlns="http://www.w3.org/2000/svg">
-                <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
-            </svg>
-        </button>
-        <button class="input-btn btn-mic" id="micBtn" onclick="toggleMic()">
-            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-                <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
             </svg>
         </button>
     </div>
@@ -396,7 +419,7 @@ async function sendInput() {
     if (!text || !currentSession) return;
     inputEl.value = '';
     inputEl.style.height = 'auto';
-    inputEl.classList.remove('has-voice');
+    document.getElementById('inputWrap').classList.remove('has-voice');
     autoScroll = true;
 
     await fetch(`${API}/sessions/${currentSession}/send`, {
@@ -411,7 +434,7 @@ async function sendInput() {
 function clearInput() {
     inputEl.value = '';
     inputEl.style.height = 'auto';
-    inputEl.classList.remove('has-voice');
+    document.getElementById('inputWrap').classList.remove('has-voice');
     document.getElementById('btnClear').style.display = 'none';
     inputEl.focus();
 }
@@ -475,7 +498,7 @@ function appendToInput(text) {
     } else {
         inputEl.value = text;
     }
-    inputEl.classList.add('has-voice');
+    document.getElementById('inputWrap').classList.add('has-voice');
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
     updateClearBtn();
