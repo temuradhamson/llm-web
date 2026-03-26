@@ -16,12 +16,151 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import httpx
 
-app = FastAPI()
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+
+# --- Persistence ---
+DATA_DIR = Path(os.getenv("LLM_WEB_DATA", "/workspace/.llm_web_data"))
+SESSIONS_FILE = DATA_DIR / "sessions.json"
+HISTORY_DIR = DATA_DIR / "history"
 
 SESSION_PREFIX = "agent"
 STARTUP_TIMEOUT = 30
 SEND_ENTER_DELAY = float(os.getenv("SEND_ENTER_DELAY", "0.2"))
+
+
+def ensure_data_dirs():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_session_registry() -> dict:
+    if SESSIONS_FILE.exists():
+        try:
+            return json_mod.loads(SESSIONS_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_session_registry(registry: dict):
+    ensure_data_dirs()
+    SESSIONS_FILE.write_text(json_mod.dumps(registry, indent=2, ensure_ascii=False))
+
+
+def register_session(session_id: str, workdir: str, cli: str):
+    reg = load_session_registry()
+    reg[session_id] = {
+        "workdir": workdir,
+        "cli": cli,
+        "created": datetime.now().isoformat(),
+    }
+    save_session_registry(reg)
+
+
+def unregister_session(session_id: str):
+    reg = load_session_registry()
+    reg.pop(session_id, None)
+    save_session_registry(reg)
+
+
+def save_history_snapshot(session_id: str):
+    """Capture full terminal output and append new lines to history file."""
+    target = f"{SESSION_PREFIX}-{session_id}:0.0"
+    proc = run_cmd(["tmux", "capture-pane", "-p", "-t", target, "-S", "-"])
+    if proc.returncode != 0:
+        return
+    ensure_data_dirs()
+    history_file = HISTORY_DIR / f"{session_id}.log"
+    current = proc.stdout
+    # Write full snapshot (overwrite) — keeps latest state
+    history_file.write_text(current)
+
+
+async def history_saver_loop():
+    """Background task: save history for all sessions every 60s."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            proc = run_cmd(["tmux", "list-sessions", "-F", "#{session_name}"])
+            if proc.returncode != 0:
+                continue
+            for line in proc.stdout.strip().splitlines():
+                if line.startswith(f"{SESSION_PREFIX}-"):
+                    sid = line.removeprefix(f"{SESSION_PREFIX}-")
+                    save_history_snapshot(sid)
+        except Exception:
+            pass
+
+
+async def restore_sessions():
+    """Restore sessions from registry on startup."""
+    reg = load_session_registry()
+    if not reg:
+        return
+
+    # Check which sessions are already running
+    proc = run_cmd(["tmux", "list-sessions", "-F", "#{session_name}"])
+    existing = set()
+    if proc.returncode == 0:
+        existing = {
+            s.removeprefix(f"{SESSION_PREFIX}-")
+            for s in proc.stdout.strip().splitlines()
+            if s.startswith(f"{SESSION_PREFIX}-")
+        }
+
+    for sid, info in reg.items():
+        if sid in existing:
+            continue
+        workdir = info.get("workdir", "/workspace/current")
+        cli_name = info.get("cli", "claude")
+        try:
+            cli = CLI(cli_name)
+        except ValueError:
+            continue
+
+        name = f"{SESSION_PREFIX}-{sid}"
+        p = run_cmd(["tmux", "new-session", "-d", "-s", name, "-c", workdir])
+        if p.returncode != 0:
+            continue
+        run_cmd(["tmux", "set-option", "-t", name, "history-limit", "50000"])
+        target = f"{name}:0.0"
+        run_cmd(["tmux", "send-keys", "-t", target, "-l", "--", CLI_COMMANDS[cli]])
+        run_cmd(["tmux", "send-keys", "-t", target, "Enter"])
+        print(f"[RESTORE] Session '{sid}' restored ({cli_name} in {workdir})")
+
+
+def ensure_session_claude_md(session_id: str, workdir: str, cli: str):
+    """Create CLAUDE.md in workdir if it doesn't exist, with session context."""
+    wdir = Path(workdir)
+    if not wdir.exists():
+        return
+    claude_md = wdir / "CLAUDE.md"
+    if claude_md.exists():
+        return
+    claude_md.write_text(
+        f"# Project Context\n\n"
+        f"Session: {session_id}\n"
+        f"CLI: {cli}\n"
+        f"Working directory: {workdir}\n\n"
+        f"## Notes\n\n"
+        f"Add project-specific context here.\n"
+    )
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """Startup: restore sessions + start history saver."""
+    ensure_data_dirs()
+    await restore_sessions()
+    task = asyncio.create_task(history_saver_loop())
+    yield
+    task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 # ASR config
 ASR_API_URL = os.getenv("ASR_API_URL", "https://whisper-asr.2dox.uz/qwen/transcribe")
@@ -153,6 +292,10 @@ async def create_session(payload: CreateSession):
     tmux("send-keys", "-t", target, "-l", "--", CLI_COMMANDS[payload.cli])
     tmux("send-keys", "-t", target, "Enter")
 
+    # Persist session + create CLAUDE.md
+    register_session(payload.session_id, payload.workdir, payload.cli.value)
+    ensure_session_claude_md(payload.session_id, payload.workdir, payload.cli.value)
+
     ready = await wait_for_ready(payload.session_id, payload.cli)
     if not ready:
         output = get_pane_output(payload.session_id, lines=40)
@@ -177,8 +320,11 @@ async def create_session(payload: CreateSession):
 @app.delete("/sessions/{session_id}")
 def delete_session(session_id: str):
     require_session(session_id)
+    # Save final history before deleting
+    save_history_snapshot(session_id)
     name = session_name(session_id)
     tmux("kill-session", "-t", name)
+    unregister_session(session_id)
     return {"ok": True, "session_id": session_id}
 
 
@@ -191,6 +337,35 @@ def tail(session_id: str, lines: int = 80, full: bool = False):
     if proc.returncode != 0:
         raise HTTPException(status_code=500, detail=proc.stderr.strip() or "capture failed")
     return {"session_id": session_id, "output": proc.stdout}
+
+
+@app.get("/sessions/{session_id}/history")
+def get_history(session_id: str):
+    """Get saved history for a session (even if session is dead)."""
+    validate_id(session_id)
+    history_file = HISTORY_DIR / f"{session_id}.log"
+    if history_file.exists():
+        return {"session_id": session_id, "output": history_file.read_text()}
+    return {"session_id": session_id, "output": ""}
+
+
+@app.get("/sessions/registry")
+def get_registry():
+    """Get all registered sessions (including dead ones with history)."""
+    reg = load_session_registry()
+    # Check which are alive
+    proc = tmux("list-sessions", "-F", "#{session_name}")
+    alive = set()
+    if proc.returncode == 0:
+        alive = {
+            s.removeprefix(f"{SESSION_PREFIX}-")
+            for s in proc.stdout.strip().splitlines()
+            if s.startswith(f"{SESSION_PREFIX}-")
+        }
+    result = {}
+    for sid, info in reg.items():
+        result[sid] = {**info, "alive": sid in alive}
+    return result
 
 
 @app.post("/sessions/{session_id}/send")

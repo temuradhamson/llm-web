@@ -5,3 +5,4 @@ __pycache__/
 *.pem
 node_modules/
 .last_good_commit
+.llm_web_data/
