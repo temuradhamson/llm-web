@@ -199,6 +199,19 @@
         .fab-down.show { display: flex; }
         .fab-down:active { transform: scale(0.9); }
         .fab-down svg { width: 20px; height: 20px; fill: var(--dim); }
+
+        /* TTS play button */
+        .tts-line { display: flex; align-items: flex-start; gap: 6px; margin: 2px 0; }
+        .tts-text { flex: 1; }
+        .tts-btn {
+            flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%;
+            background: var(--blue); border: none; display: inline-flex;
+            align-items: center; justify-content: center; cursor: pointer;
+            transition: transform .1s, opacity .1s; vertical-align: middle;
+        }
+        .tts-btn:active { transform: scale(0.85); opacity: 0.7; }
+        .tts-btn.playing { background: var(--accent); }
+        .tts-btn svg { width: 14px; height: 14px; fill: #fff; }
     </style>
 </head>
 <body>
@@ -406,7 +419,14 @@ async function pollOutput() {
         const raw = data.output || '';
         if (raw !== lastOutput) {
             lastOutput = raw;
-            outputEl.innerHTML = ansiToHtml(raw);
+            let html = ansiToHtml(raw);
+            // Replace 🔊 lines with TTS play buttons
+            html = html.replace(/🔊\s*(.+?)(?=\n|$)/g, (_, text) => {
+                const clean = text.replace(/<[^>]*>/g, '').trim();
+                const encoded = clean.replace(/'/g, '&#39;');
+                return `<span class="tts-line"><span class="tts-text">🔊 ${text}</span><button class="tts-btn" onclick="playTTS('${encoded}', this)" title="Озвучить"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button></span>`;
+            });
+            outputEl.innerHTML = html;
             if (autoScroll) scrollToBottom();
         }
         document.getElementById('statusDot').classList.add('on');
@@ -778,6 +798,56 @@ async function toggleMic() {
             status.textContent = `${Math.floor(recSec/60)}:${String(recSec%60).padStart(2,'0')} — говорите...`;
         }, 1000);
     } catch { alert('Нет доступа к микрофону'); }
+}
+
+// --- TTS ---
+let currentAudio = null;
+let currentTTSBtn = null;
+
+async function playTTS(text, btn) {
+    // If same button clicked while playing — stop
+    if (currentAudio && currentTTSBtn === btn) {
+        currentAudio.pause();
+        currentAudio = null;
+        btn.classList.remove('playing');
+        currentTTSBtn = null;
+        return;
+    }
+    // Stop previous
+    if (currentAudio) {
+        currentAudio.pause();
+        if (currentTTSBtn) currentTTSBtn.classList.remove('playing');
+    }
+
+    btn.classList.add('playing');
+    currentTTSBtn = btn;
+
+    try {
+        const res = await fetch(`${API}/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+        });
+        if (!res.ok) { btn.classList.remove('playing'); currentTTSBtn = null; return; }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        currentAudio = new Audio(url);
+        currentAudio.onended = () => {
+            btn.classList.remove('playing');
+            currentTTSBtn = null;
+            currentAudio = null;
+            URL.revokeObjectURL(url);
+        };
+        currentAudio.onerror = () => {
+            btn.classList.remove('playing');
+            currentTTSBtn = null;
+            currentAudio = null;
+        };
+        currentAudio.play();
+    } catch {
+        btn.classList.remove('playing');
+        currentTTSBtn = null;
+    }
 }
 
 // --- Password modal ---

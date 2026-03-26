@@ -735,6 +735,40 @@ async def asr(audio: UploadFile = File(...)):
     return resp.json()
 
 
+# --- TTS ---
+
+TTS_API_URL = os.getenv("TTS_API_URL", "https://whisper-asr.2dox.uz/speak")
+
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "kseniya"
+    style: str = "fast"
+
+
+@app.post("/tts")
+async def tts(payload: TTSRequest):
+    async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        resp = await client.post(
+            TTS_API_URL,
+            json={
+                "text": payload.text,
+                "voice": payload.voice,
+                "style": payload.style,
+                "token": ASR_TOKEN,
+            },
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"TTS error: {resp.text[:200]}")
+
+    return Response(
+        content=resp.content,
+        media_type="audio/wav",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 # --- SSL Certificate download (for iOS mic fix) ---
 
 @app.get("/ssl-cert")
