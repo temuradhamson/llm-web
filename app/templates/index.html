@@ -86,6 +86,16 @@
                     Удалить
                 </button>
             </div>
+            <div class="flex items-center gap-2">
+                <button onclick="openPasswordModal()"
+                    class="bg-dark-700/80 hover:bg-dark-600 text-gray-400 text-sm px-2 py-1 rounded-md border border-dark-600 transition">
+                    Пароль
+                </button>
+                <a href="/logout"
+                    class="bg-dark-700/80 hover:bg-dark-600 text-gray-400 text-sm px-2 py-1 rounded-md border border-dark-600 transition no-underline">
+                    Выход
+                </a>
+            </div>
         </div>
     </div>
 
@@ -147,6 +157,33 @@
                 class="bg-dark-700 hover:bg-dark-600 text-sm px-4 py-2 rounded-md border border-dark-600 transition">Отмена</button>
             <button onclick="createSession()"
                 class="bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-2 rounded-md transition">Создать</button>
+        </div>
+    </div>
+</div>
+
+<!-- Change password modal -->
+<div id="passwordModal" class="fixed inset-0 bg-black/60 z-50 hidden items-center justify-center">
+    <div class="bg-dark-800 border border-dark-600 rounded-xl p-6 w-96 max-w-[90vw] shadow-2xl">
+        <h2 class="text-base font-semibold text-accent mb-4">Сменить пароль</h2>
+        <div id="pwdError" class="hidden bg-red-900/30 border border-red-800/40 text-red-300 text-sm rounded-md px-3 py-2 mb-3"></div>
+        <div id="pwdOk" class="hidden bg-green-900/30 border border-green-800/40 text-green-300 text-sm rounded-md px-3 py-2 mb-3"></div>
+        <label class="block text-xs text-gray-500 mb-1">Текущий пароль</label>
+        <input id="pwdCurrent" type="password"
+            class="w-full bg-dark-700 border border-dark-600 rounded-md px-3 py-2 text-sm
+                   focus:outline-none focus:border-accent mb-3" />
+        <label class="block text-xs text-gray-500 mb-1">Новый пароль</label>
+        <input id="pwdNew" type="password"
+            class="w-full bg-dark-700 border border-dark-600 rounded-md px-3 py-2 text-sm
+                   focus:outline-none focus:border-accent mb-3" />
+        <label class="block text-xs text-gray-500 mb-1">Подтвердите новый пароль</label>
+        <input id="pwdConfirm" type="password"
+            class="w-full bg-dark-700 border border-dark-600 rounded-md px-3 py-2 text-sm
+                   focus:outline-none focus:border-accent mb-5" />
+        <div class="flex justify-end gap-2">
+            <button onclick="closePasswordModal()"
+                class="bg-dark-700 hover:bg-dark-600 text-sm px-4 py-2 rounded-md border border-dark-600 transition">Отмена</button>
+            <button onclick="changePassword()"
+                class="bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-2 rounded-md transition">Сохранить</button>
         </div>
     </div>
 </div>
@@ -287,6 +324,7 @@
     async function loadSessions() {
         try {
             const res = await fetch(`${API}/health`);
+            if (res.status === 401) { location.href = '/login'; return; }
             const data = await res.json();
             const select = document.getElementById('sessionSelect');
             const prev = select.value;
@@ -564,6 +602,67 @@
     function closeCreateModal() {
         document.getElementById('createModal').classList.add('hidden');
         document.getElementById('createModal').classList.remove('flex');
+    }
+
+    // --- Password modal ---
+
+    function openPasswordModal() {
+        document.getElementById('passwordModal').classList.remove('hidden');
+        document.getElementById('passwordModal').classList.add('flex');
+        document.getElementById('pwdError').classList.add('hidden');
+        document.getElementById('pwdOk').classList.add('hidden');
+        document.getElementById('pwdCurrent').value = '';
+        document.getElementById('pwdNew').value = '';
+        document.getElementById('pwdConfirm').value = '';
+        document.getElementById('pwdCurrent').focus();
+    }
+
+    function closePasswordModal() {
+        document.getElementById('passwordModal').classList.add('hidden');
+        document.getElementById('passwordModal').classList.remove('flex');
+    }
+
+    async function changePassword() {
+        const errEl = document.getElementById('pwdError');
+        const okEl = document.getElementById('pwdOk');
+        errEl.classList.add('hidden');
+        okEl.classList.add('hidden');
+
+        const current = document.getElementById('pwdCurrent').value;
+        const newPwd = document.getElementById('pwdNew').value;
+        const confirm = document.getElementById('pwdConfirm').value;
+
+        if (!current || !newPwd) {
+            errEl.textContent = 'Заполните все поля';
+            errEl.classList.remove('hidden');
+            return;
+        }
+        if (newPwd !== confirm) {
+            errEl.textContent = 'Пароли не совпадают';
+            errEl.classList.remove('hidden');
+            return;
+        }
+
+        try {
+            const res = await fetch(`${API}/change-password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ current_password: current, new_password: newPwd }),
+            });
+            if (!res.ok) {
+                let detail = 'Ошибка';
+                try { const d = await res.json(); detail = d.detail || detail; } catch {}
+                errEl.textContent = detail;
+                errEl.classList.remove('hidden');
+                return;
+            }
+            okEl.textContent = 'Пароль изменён!';
+            okEl.classList.remove('hidden');
+            setTimeout(closePasswordModal, 1500);
+        } catch (err) {
+            errEl.textContent = 'Ошибка сети';
+            errEl.classList.remove('hidden');
+        }
     }
 
     // --- Init ---

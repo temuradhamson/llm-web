@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход — Agent Terminal</title>
+    <style>
+        :root { --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333; --border: #2d333b; --text: #e6edf3; --dim: #8b949e; --accent: #e94560; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; }
+        body { display: flex; align-items: center; justify-content: center; }
+        .card {
+            background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+            padding: 32px; width: 360px; max-width: 90vw;
+        }
+        h1 { font-size: 20px; font-weight: 600; margin-bottom: 24px; text-align: center; }
+        label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 4px; }
+        input {
+            width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px;
+            padding: 10px 12px; font-size: 15px; color: var(--text); outline: none; margin-bottom: 16px;
+        }
+        input:focus { border-color: var(--accent); }
+        button {
+            width: 100%; background: var(--accent); border: none; border-radius: 8px;
+            padding: 12px; font-size: 15px; font-weight: 600; color: #fff; cursor: pointer;
+            transition: opacity .2s;
+        }
+        button:hover { opacity: 0.85; }
+        .error { background: #ff7b7220; border: 1px solid #ff7b7240; border-radius: 8px; padding: 10px; margin-bottom: 16px; font-size: 13px; color: #ff7b72; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Agent Terminal</h1>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST" action="/login">
+            <label for="username">Логин</label>
+            <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+            <label for="password">Пароль</label>
+            <input type="password" id="password" name="password" autocomplete="current-password" required>
+            <button type="submit">Войти</button>
+        </form>
+    </div>
+</body>
+</html>

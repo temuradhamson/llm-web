@@ -208,6 +208,10 @@
 <div class="drawer" id="drawer">
     <div class="drawer-title">Сессии</div>
     <div class="drawer-list" id="drawerList"></div>
+    <div style="padding: 12px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px;">
+        <button onclick="openPasswordModal()" style="flex:1; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; color: var(--dim); font-size: 13px; cursor: pointer;">Пароль</button>
+        <a href="/logout" style="flex:1; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; color: var(--accent); font-size: 13px; cursor: pointer; text-align: center; text-decoration: none;">Выход</a>
+    </div>
 </div>
 
 <!-- Header -->
@@ -397,6 +401,7 @@ async function pollOutput() {
     if (!currentSession) return;
     try {
         const res = await fetch(`${API}/sessions/${currentSession}/tail?full=true`);
+        if (res.status === 401) { location.href = '/login'; return; }
         const data = await res.json();
         const raw = data.output || '';
         if (raw !== lastOutput) {
@@ -553,6 +558,7 @@ async function deleteSessionById(id) {
 async function loadSessions() {
     try {
         const res = await fetch(`${API}/health`);
+        if (res.status === 401) { location.href = '/login'; return; }
         const data = await res.json();
         const prev = selectEl.value;
 
@@ -774,9 +780,59 @@ async function toggleMic() {
     } catch { alert('Нет доступа к микрофону'); }
 }
 
+// --- Password modal ---
+function openPasswordModal() {
+    closeDrawer();
+    document.getElementById('pwdModal').style.display = 'flex';
+    document.getElementById('pwdCurrent').value = '';
+    document.getElementById('pwdNew').value = '';
+    document.getElementById('pwdConfirm').value = '';
+    document.getElementById('pwdMsg').textContent = '';
+    document.getElementById('pwdMsg').style.display = 'none';
+}
+function closePasswordModal() {
+    document.getElementById('pwdModal').style.display = 'none';
+}
+async function doChangePassword() {
+    const msgEl = document.getElementById('pwdMsg');
+    const cur = document.getElementById('pwdCurrent').value;
+    const np = document.getElementById('pwdNew').value;
+    const nc = document.getElementById('pwdConfirm').value;
+    if (!cur || !np) { msgEl.textContent = 'Заполните все поля'; msgEl.style.color = 'var(--accent)'; msgEl.style.display = 'block'; return; }
+    if (np !== nc) { msgEl.textContent = 'Пароли не совпадают'; msgEl.style.color = 'var(--accent)'; msgEl.style.display = 'block'; return; }
+    try {
+        const res = await fetch(`${API}/change-password`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current_password: cur, new_password: np }),
+        });
+        if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            msgEl.textContent = d.detail || 'Ошибка'; msgEl.style.color = 'var(--accent)'; msgEl.style.display = 'block';
+            return;
+        }
+        msgEl.textContent = 'Пароль изменён!'; msgEl.style.color = 'var(--ok)'; msgEl.style.display = 'block';
+        setTimeout(closePasswordModal, 1500);
+    } catch { msgEl.textContent = 'Ошибка сети'; msgEl.style.color = 'var(--accent)'; msgEl.style.display = 'block'; }
+}
+
 // --- Init ---
 loadSessions();
 setInterval(loadSessions, 15000);
 </script>
+
+<!-- Password modal -->
+<div id="pwdModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:50; align-items:center; justify-content:center;">
+    <div style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:20px; width:90%; max-width:360px;">
+        <div style="font-size:15px; font-weight:600; color:var(--accent); margin-bottom:12px;">Сменить пароль</div>
+        <div id="pwdMsg" style="display:none; font-size:13px; padding:8px; border-radius:6px; background:var(--bg3); margin-bottom:8px;"></div>
+        <input id="pwdCurrent" type="password" placeholder="Текущий пароль" style="width:100%; padding:8px 10px; margin-bottom:8px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:14px; outline:none;">
+        <input id="pwdNew" type="password" placeholder="Новый пароль" style="width:100%; padding:8px 10px; margin-bottom:8px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:14px; outline:none;">
+        <input id="pwdConfirm" type="password" placeholder="Подтвердите пароль" style="width:100%; padding:8px 10px; margin-bottom:12px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:14px; outline:none;">
+        <div style="display:flex; gap:8px;">
+            <button onclick="closePasswordModal()" style="flex:1; padding:10px; border-radius:6px; background:var(--bg3); border:1px solid var(--border); color:var(--text); font-size:14px; cursor:pointer;">Отмена</button>
+            <button onclick="doChangePassword()" style="flex:1; padding:10px; border-radius:6px; background:var(--accent); border:none; color:white; font-size:14px; font-weight:600; cursor:pointer;">Сохранить</button>
+        </div>
+    </div>
+</div>
 </body>
 </html>

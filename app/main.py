@@ -1,9 +1,11 @@
 import asyncio
 import fcntl
+import hashlib
 import json as json_mod
 import os
 import pty
 import re
+import secrets
 import select
 import struct
 import subprocess
@@ -11,9 +13,10 @@ import termios
 from pathlib import Path
 from enum import Enum
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
 
 from contextlib import asynccontextmanager
@@ -28,6 +31,73 @@ HISTORY_DIR = DATA_DIR / "history"
 SESSION_PREFIX = "agent"
 STARTUP_TIMEOUT = 30
 SEND_ENTER_DELAY = float(os.getenv("SEND_ENTER_DELAY", "0.2"))
+
+
+# --- Auth ---
+AUTH_FILE = DATA_DIR / "auth.json"
+ACTIVE_SESSIONS: dict[str, str] = {}  # token -> username
+
+PUBLIC_PATHS = {"/login", "/health"}
+
+
+def hash_password(password: str, salt: str = "") -> str:
+    if not salt:
+        salt = secrets.token_hex(16)
+    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    return f"{salt}:{h}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    salt = stored.split(":")[0]
+    return hash_password(password, salt) == stored
+
+
+def load_auth() -> dict:
+    if AUTH_FILE.exists():
+        try:
+            return json_mod.loads(AUTH_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_auth(data: dict):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    AUTH_FILE.write_text(json_mod.dumps(data, indent=2, ensure_ascii=False))
+
+
+def ensure_default_auth():
+    """Create default admin user if no auth file exists."""
+    auth = load_auth()
+    if not auth.get("users"):
+        auth["users"] = {
+            "admin": {"password": hash_password("админ123")}
+        }
+        save_auth(auth)
+
+
+def get_user_from_request(request: Request) -> str | None:
+    token = request.cookies.get("session_token")
+    if token and token in ACTIVE_SESSIONS:
+        return ACTIVE_SESSIONS[token]
+    return None
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        # Allow public paths, static, and websocket (ws auth checked separately)
+        if path in PUBLIC_PATHS or path.startswith("/ws/"):
+            return await call_next(request)
+
+        user = get_user_from_request(request)
+        if not user:
+            if path.startswith("/sessions") or path.startswith("/asr"):
+                return Response(status_code=401, content="Unauthorized")
+            return RedirectResponse(url="/login", status_code=302)
+
+        request.state.user = user
+        return await call_next(request)
 
 
 def ensure_data_dirs():
@@ -153,6 +223,7 @@ def ensure_session_claude_md(session_id: str, workdir: str, cli: str):
 async def lifespan(app):
     """Startup: restore sessions + start history saver."""
     ensure_data_dirs()
+    ensure_default_auth()
     await restore_sessions()
     task = asyncio.create_task(history_saver_loop())
     yield
@@ -160,6 +231,7 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(AuthMiddleware)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 # ASR config
@@ -244,6 +316,70 @@ class CreateSession(BaseModel):
 
 class SendRequest(BaseModel):
     text: str
+
+
+# --- Auth Endpoints ---
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    user = get_user_from_request(request)
+    if user:
+        return RedirectResponse(url="/", status_code=302)
+    return templates.TemplateResponse(request, "login.html")
+
+
+@app.post("/login")
+async def login(request: Request):
+    form = await request.form()
+    username = form.get("username", "").strip()
+    password = form.get("password", "")
+
+    auth = load_auth()
+    users = auth.get("users", {})
+    user_data = users.get(username)
+
+    if not user_data or not verify_password(password, user_data["password"]):
+        return templates.TemplateResponse(request, "login.html", {"error": "Неверный логин или пароль"})
+
+    token = secrets.token_hex(32)
+    ACTIVE_SESSIONS[token] = username
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie("session_token", token, httponly=True, samesite="lax", max_age=86400 * 30)
+    return response
+
+
+@app.get("/logout")
+def logout(request: Request):
+    token = request.cookies.get("session_token")
+    if token:
+        ACTIVE_SESSIONS.pop(token, None)
+    response = RedirectResponse(url="/login", status_code=302)
+    response.delete_cookie("session_token")
+    return response
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/change-password")
+async def change_password(request: Request, payload: ChangePasswordRequest):
+    user = get_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    auth = load_auth()
+    user_data = auth["users"].get(user)
+    if not user_data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not verify_password(payload.current_password, user_data["password"]):
+        raise HTTPException(status_code=403, detail="Неверный текущий пароль")
+
+    auth["users"][user]["password"] = hash_password(payload.new_password)
+    save_auth(auth)
+    return {"ok": True}
 
 
 # --- Endpoints ---
@@ -405,6 +541,12 @@ def interrupt(session_id: str):
 @app.websocket("/ws/terminal/{session_id}")
 async def ws_terminal(ws: WebSocket, session_id: str):
     """WebSocket — подключает xterm.js к tmux-сессии через pty."""
+    # Auth check for WebSocket
+    token = ws.cookies.get("session_token")
+    if not token or token not in ACTIVE_SESSIONS:
+        await ws.close(code=4001, reason="Unauthorized")
+        return
+
     validate_id(session_id)
     name = session_name(session_id)
 
