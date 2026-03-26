@@ -846,6 +846,8 @@ let pendingVoiceBuffer = ''; // accumulates text until sentence boundary
 let ttsQueue = [];
 let ttsPlaying = false;
 let voicePollTimer = null;
+let voiceIdleTimer = null; // flush remaining buffer when output stops changing
+let voiceLastChangeTime = 0;
 
 // Init toggle state on DOM ready
 setTimeout(() => {
@@ -890,7 +892,16 @@ async function voicePoll() {
         const data = await res.json();
         const raw = data.output || '';
         if (raw === lastVoicedOutput) return;
+        voiceLastChangeTime = Date.now();
         processAutoVoice(raw);
+        // Set idle timer: if output stops changing for 2s, flush remaining buffer
+        clearTimeout(voiceIdleTimer);
+        voiceIdleTimer = setTimeout(() => {
+            if (pendingVoiceBuffer && pendingVoiceBuffer.length >= 10) {
+                queueTTS(pendingVoiceBuffer.trim());
+                pendingVoiceBuffer = '';
+            }
+        }, 2000);
     } catch {}
 }
 
@@ -901,100 +912,112 @@ function voiceCooldown() {
     pendingVoiceBuffer = '';
 }
 
-// Strip ANSI codes
-function stripAnsi(text) {
+// Strip ANSI codes and markdown formatting for TTS
+function stripForTTS(text) {
     return text
+        // ANSI escape codes
         .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
         .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-        .replace(/\x1b[^\x1b]{0,8}/g, '');
+        .replace(/\x1b[^\x1b]{0,8}/g, '')
+        // Markdown: bold, italic, code
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/\*([^*]+)\*/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/^#{1,6}\s+/gm, '')
+        // Bullet points → just the text
+        .replace(/^[\s]*[-*+•]\s+/gm, '')
+        // Numbered lists
+        .replace(/^[\s]*\d+[.)]\s+/gm, '')
+        // Clean up extra whitespace
+        .replace(/\s+/g, ' ');
 }
 
-// Is this line natural human speech (not code/commands/noise)?
-function isVoiceable(line) {
+// Is this line code/noise that should NOT be voiced?
+function isNoise(line) {
     const t = line.trim();
-    if (!t || t.length < 8) return false;
-    // Skip code patterns
-    if (/^\s{4,}\S/.test(line)) return false;                    // indented code
-    if (/^[{}\[\]<>\/\\|`~#$%^&*+=;:()]/.test(t)) return false;  // starts with code chars
-    if (/^(import |from |def |class |const |let |var |function |async |await |return |if \(|else |for |while |try |catch |export |module)/.test(t)) return false;
-    if (/^\d+[→│|:\t]/.test(t)) return false;                    // line numbers
-    if (/^[─━═╔╗╚╝├┤┬┴┼┌┐└┘│╭╮╰╯]/.test(t)) return false;      // box drawing
-    if (/^(INFO|WARNING|ERROR|DEBUG|HTTP|GET |POST |PUT |DELETE )/.test(t)) return false;
-    if (/^[-*+] \[[ x]\]/.test(t)) return false;                 // checkboxes
-    if (/^(```|---)/.test(t)) return false;                       // markdown fences
-    if (/^\$ /.test(t)) return false;                              // shell commands
-    if (/^[a-zA-Z_\/][a-zA-Z0-9_\/.]*\.(py|js|ts|html|css|json|sh|md|yml|yaml|toml|txt|log|cfg|ini|env)/.test(t)) return false; // file paths
-    if (/^(curl |cd |ls |cat |grep |git |npm |pip |docker |tmux |pm2 )/.test(t)) return false; // commands
-    // Must contain actual words (Cyrillic or Latin)
-    const wordCount = (t.match(/[а-яА-ЯёЁa-zA-Z]{2,}/g) || []).length;
-    return wordCount >= 2;
+    if (!t || t.length < 3) return true;
+    // Indented code blocks (4+ spaces)
+    if (/^\s{4,}\S/.test(line)) return true;
+    // Code fences
+    if (/^```/.test(t)) return true;
+    // Programming keywords at start of line
+    if (/^(import |from |def |class |const |let |var |function |async function|return |if \(|else\b|for \(|while \(|try\b|catch\b|export |module\.)/.test(t)) return true;
+    // Line numbers (e.g. "123→" or "  45\t")
+    if (/^\s*\d+[→│|:\t]/.test(t)) return true;
+    // Box drawing
+    if (/^[─━═╔╗╚╝├┤┬┴┼┌┐└┘│╭╮╰╯┃]/.test(t)) return true;
+    // Log lines
+    if (/^(INFO|WARNING|ERROR|DEBUG|HTTP\/|Shell cwd|\[.*\]\s*(INFO|WARN|ERROR))/.test(t)) return true;
+    // File paths on their own
+    if (/^[\/~][a-zA-Z0-9_\/.]+$/.test(t)) return true;
+    // Shell commands
+    if (/^\$\s/.test(t)) return true;
+    // Pure punctuation/symbols
+    if (/^[^а-яА-ЯёЁa-zA-Z]*$/.test(t)) return true;
+    return false;
 }
 
-// Extract new voiceable text from raw terminal diff
+// Process new terminal output for auto-voice
 function processAutoVoice(raw) {
     if (!autoVoice || !raw) return;
 
-    // Find what's new since last voiced
+    // Find what's new since last check
     let newPart = '';
-    if (lastVoicedOutput && raw.length > lastVoicedOutput.length) {
-        // Find common prefix length
-        let i = 0;
-        const minLen = Math.min(lastVoicedOutput.length, raw.length);
-        while (i < minLen && lastVoicedOutput[i] === raw[i]) i++;
-        newPart = raw.substring(i);
-    } else if (!lastVoicedOutput) {
-        // First run — don't voice everything, just set baseline
-        lastVoicedOutput = raw;
-        return;
-    } else {
-        // Output shortened (terminal scrollback trimmed) — just update baseline
+    if (!lastVoicedOutput) {
         lastVoicedOutput = raw;
         return;
     }
+
+    // Simple diff: find common prefix
+    let i = 0;
+    const minLen = Math.min(lastVoicedOutput.length, raw.length);
+    while (i < minLen && lastVoicedOutput[i] === raw[i]) i++;
+    newPart = raw.substring(i);
     lastVoicedOutput = raw;
 
     if (!newPart || newPart.length < 5) return;
 
-    // Clean and split into lines
-    const clean = stripAnsi(newPart);
+    // Clean the new part
+    const clean = stripForTTS(newPart);
     const lines = clean.split('\n');
 
-    // Collect voiceable lines
-    const voiceable = [];
+    // Keep non-noise lines
+    const good = [];
     for (const line of lines) {
-        if (isVoiceable(line)) {
-            voiceable.push(line.trim());
+        if (!isNoise(line)) {
+            good.push(line.trim());
         }
     }
+    if (good.length === 0) return;
 
-    if (voiceable.length === 0) return;
+    // Add to buffer
+    const chunk = good.join(' ').replace(/\s+/g, ' ').trim();
+    if (!chunk) return;
+    pendingVoiceBuffer += (pendingVoiceBuffer ? ' ' : '') + chunk;
 
-    // Add to pending buffer
-    pendingVoiceBuffer += (pendingVoiceBuffer ? ' ' : '') + voiceable.join('. ');
-
-    // Flush complete sentences from buffer
-    flushVoiceBuffer(false);
+    // Flush logic: send to TTS as soon as we have enough text
+    flushVoiceBuffer();
 }
 
-function flushVoiceBuffer(force) {
-    if (!pendingVoiceBuffer) return;
+function flushVoiceBuffer() {
+    if (!pendingVoiceBuffer || pendingVoiceBuffer.length < 15) return;
 
-    // Find last sentence boundary (. ! ? or end of paragraph)
-    const sentenceEnd = pendingVoiceBuffer.search(/[.!?:]\s+(?=[А-ЯA-Z🔊])/);
-
-    if (sentenceEnd >= 0) {
-        // Voice everything up to and including the sentence end
-        const toVoice = pendingVoiceBuffer.substring(0, sentenceEnd + 1).trim();
-        pendingVoiceBuffer = pendingVoiceBuffer.substring(sentenceEnd + 2).trim();
+    // Look for natural break points: sentence endings
+    // Match period/exclamation/question followed by space (or end)
+    const match = pendingVoiceBuffer.match(/^(.{15,}?[.!?:—])\s/);
+    if (match) {
+        const toVoice = match[1].trim();
+        pendingVoiceBuffer = pendingVoiceBuffer.substring(match[0].length).trim();
         if (toVoice.length >= 10) queueTTS(toVoice);
-    } else if (force && pendingVoiceBuffer.length >= 10) {
-        // Force flush remaining
-        queueTTS(pendingVoiceBuffer.trim());
-        pendingVoiceBuffer = '';
-    } else if (pendingVoiceBuffer.length > 300) {
-        // Buffer too long without sentence boundary — flush as-is
-        queueTTS(pendingVoiceBuffer.trim());
-        pendingVoiceBuffer = '';
+        // Recursively flush if more sentences ready
+        if (pendingVoiceBuffer.length > 15) flushVoiceBuffer();
+    } else if (pendingVoiceBuffer.length > 150) {
+        // No sentence boundary found but buffer is long — flush at word boundary
+        const cutAt = pendingVoiceBuffer.lastIndexOf(' ', 150);
+        const idx = cutAt > 50 ? cutAt : 150;
+        const toVoice = pendingVoiceBuffer.substring(0, idx).trim();
+        pendingVoiceBuffer = pendingVoiceBuffer.substring(idx).trim();
+        if (toVoice.length >= 10) queueTTS(toVoice);
     }
 }
 
