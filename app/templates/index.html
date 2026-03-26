@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ru" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Agent Terminal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        dark: { 900: '#0d1117', 800: '#161b22', 700: '#1c2333', 600: '#2d333b', 500: '#444c56' },
+                        accent: { DEFAULT: '#e94560', hover: '#c73e54' },
+                        ok: '#4ecca3',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        * { box-sizing: border-box; }
+        html, body { height: 100%; overflow: hidden; margin: 0; padding: 0; }
+
+        @keyframes pulse-rec { 0%,100%{opacity:1} 50%{opacity:.5} }
+        .recording { animation: pulse-rec 1.5s infinite; }
+
+        /* Layout: flex column fills viewport */
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            height: 100dvh; /* dynamic viewport height — respects iOS keyboard/bars */
+        }
+
+        /* Terminal fills remaining space */
+        #terminal-container { flex: 1; min-height: 0; overflow: hidden; }
+        #terminal-container .xterm,
+        #terminal-container .xterm-screen { height: 100% !important; width: 100% !important; }
+        #terminal-container .xterm-viewport::-webkit-scrollbar { width: 6px; }
+        #terminal-container .xterm-viewport::-webkit-scrollbar-thumb { background: #2d333b; border-radius: 3px; }
+
+        /* Toolbar: auto-hide on desktop, always visible on mobile */
+        #toolbar {
+            opacity: 0; transform: translateY(-100%);
+            transition: opacity .3s, transform .3s;
+            pointer-events: none;
+        }
+        #toolbar-zone:hover #toolbar, #toolbar.pinned {
+            opacity: 1; transform: translateY(0); pointer-events: auto;
+        }
+        @media (max-width: 768px) {
+            #toolbar { opacity: 1; transform: translateY(0); pointer-events: auto; position: relative; }
+            #toolbar-zone { position: relative; height: auto; }
+        }
+        @media (min-width: 769px) {
+            #toolbar-zone { position: absolute; top: 0; left: 0; right: 0; z-index: 10; height: 48px; }
+        }
+
+        /* Voice panel */
+        #voicePanel { padding-bottom: env(safe-area-inset-bottom, 0px); flex-shrink: 0; }
+    </style>
+</head>
+<body class="bg-dark-900 text-gray-200">
+
+<div id="app">
+    <!-- Toolbar -->
+    <div id="toolbar-zone">
+        <div id="toolbar" class="flex items-center justify-between px-4 py-2 bg-dark-800/90 backdrop-blur-sm border-b border-dark-600/50 pinned">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span id="statusDot" class="w-2 h-2 rounded-full bg-dark-500 shrink-0"></span>
+                <select id="sessionSelect"
+                    class="bg-dark-700/80 border border-dark-600 text-sm rounded-md px-3 py-1 focus:outline-none focus:border-accent">
+                    <option value="">-- нет сессий --</option>
+                </select>
+                <button onclick="openCreateModal()"
+                    class="bg-accent hover:bg-accent-hover text-white text-sm font-medium px-3 py-1 rounded-md transition">
+                    + Сессия
+                </button>
+                <button onclick="deleteSession()"
+                    class="bg-red-900/50 hover:bg-red-800/60 text-red-300 text-sm px-2 py-1 rounded-md border border-red-800/40 transition">
+                    Удалить
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Terminal -->
+    <div id="terminal-container"></div>
+
+    <!-- Voice panel -->
+    <div id="voicePanel" class="bg-dark-800/95 border-t border-dark-600/50">
+        <div id="transcriptBar" class="hidden px-3 pt-2 pb-1">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs text-gray-500">Распознанный текст</span>
+                <span id="asrSpinner" class="hidden text-xs text-accent">распознаю...</span>
+            </div>
+            <div class="flex gap-2">
+                <textarea id="transcriptText" rows="3"
+                    class="flex-1 bg-dark-700 border border-dark-600 rounded-md px-3 py-2 text-sm text-gray-200
+                           focus:outline-none focus:border-accent overflow-y-auto"
+                    style="max-height: 25vh;"></textarea>
+                <div class="flex flex-col gap-1">
+                    <button onclick="sendTranscript()"
+                        class="bg-ok/80 hover:bg-ok text-dark-900 text-sm font-medium px-3 py-1 rounded-md transition">⏎</button>
+                    <button onclick="cancelTranscript()"
+                        class="bg-dark-700 hover:bg-dark-600 text-gray-400 text-xs px-3 py-1 rounded-md border border-dark-600 transition">✕</button>
+                </div>
+            </div>
+        </div>
+        <div class="flex items-center gap-3 px-4 py-2">
+            <button id="micBtn" onclick="toggleMic()" title="Голосовой ввод"
+                class="w-10 h-10 flex items-center justify-center rounded-full border border-dark-600 bg-dark-700
+                       hover:bg-dark-600 text-lg transition shrink-0">🎤</button>
+            <span id="micStatus" class="text-sm text-dark-500">Нажмите для голосового ввода</span>
+        </div>
+    </div>
+</div>
+
+<!-- Create session modal -->
+<div id="createModal" class="fixed inset-0 bg-black/60 z-50 hidden items-center justify-center">
+    <div class="bg-dark-800 border border-dark-600 rounded-xl p-6 w-96 max-w-[90vw] shadow-2xl">
+        <h2 class="text-base font-semibold text-accent mb-4">Новая сессия</h2>
+        <label class="block text-xs text-gray-500 mb-1">ID сессии</label>
+        <input id="newSessionId" placeholder="main"
+            class="w-full bg-dark-700 border border-dark-600 rounded-md px-3 py-2 text-sm
+                   focus:outline-none focus:border-accent mb-3" />
+        <label class="block text-xs text-gray-500 mb-1">Рабочая директория</label>
+        <input id="newWorkdir" value="/workspace"
+            class="w-full bg-dark-700 border border-dark-600 rounded-md px-3 py-2 text-sm
+                   focus:outline-none focus:border-accent mb-3" />
+        <label class="block text-xs text-gray-500 mb-1">CLI</label>
+        <select id="newCli"
+            class="w-full bg-dark-700 border border-dark-600 rounded-md px-3 py-2 text-sm
+                   focus:outline-none focus:border-accent mb-5">
+            <option value="claude" selected>Claude</option>
+            <option value="gemini">Gemini</option>
+            <option value="codex">Codex</option>
+            <option value="qwen">Qwen</option>
+        </select>
+        <div class="flex justify-end gap-2">
+            <button onclick="closeCreateModal()"
+                class="bg-dark-700 hover:bg-dark-600 text-sm px-4 py-2 rounded-md border border-dark-600 transition">Отмена</button>
+            <button onclick="createSession()"
+                class="bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-2 rounded-md transition">Создать</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API = '';
+    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    let currentSession = null;
+    let ws = null;
+    let term = null;
+    let fitAddon = null;
+    let reconnectTimer = null;
+    let reconnectDelay = 1000;
+
+    // --- xterm.js ---
+
+    function initTerminal() {
+        if (term) return;
+
+        term = new Terminal({
+            theme: {
+                background: '#0d1117', foreground: '#e6edf3', cursor: '#e94560',
+                selectionBackground: '#264f78',
+                black: '#484f58', red: '#ff7b72', green: '#3fb950', yellow: '#d29922',
+                blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39c5cf', white: '#b1bac4',
+            },
+            fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
+            fontSize: isMobile ? 13 : 15,
+            cursorBlink: true,
+            scrollback: 5000,
+            convertEol: true,
+        });
+
+        fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+        term.open(document.getElementById('terminal-container'));
+        fitAddon.fit();
+
+        // --- Mobile touch scroll ---
+        if (isMobile) {
+            const container = document.getElementById('terminal-container');
+            let touchY = null;
+            let scrollAccum = 0;
+            const LINE_PX = 20; // pixels per scroll line
+
+            container.addEventListener('touchstart', (e) => {
+                // Only handle single-finger touches for scroll
+                if (e.touches.length === 1) {
+                    touchY = e.touches[0].clientY;
+                    scrollAccum = 0;
+                }
+            }, { passive: true });
+
+            container.addEventListener('touchmove', (e) => {
+                if (touchY === null || e.touches.length !== 1) return;
+
+                const currentY = e.touches[0].clientY;
+                const deltaY = touchY - currentY; // positive = scroll down (finger moves up)
+                touchY = currentY;
+                scrollAccum += deltaY;
+
+                // Scroll in discrete line steps
+                const lines = Math.trunc(scrollAccum / LINE_PX);
+                if (lines !== 0) {
+                    term.scrollLines(lines);
+                    scrollAccum -= lines * LINE_PX;
+                }
+
+                e.preventDefault(); // prevent iOS page bounce
+            }, { passive: false });
+
+            container.addEventListener('touchend', () => { touchY = null; }, { passive: true });
+        }
+
+        // Resize
+        window.addEventListener('resize', () => fitAddon.fit());
+        new ResizeObserver(() => fitAddon.fit()).observe(document.getElementById('terminal-container'));
+
+        term.onResize(({ cols, rows }) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+            }
+        });
+
+        term.onData((data) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(data);
+            }
+        });
+    }
+
+    function refitTerminal() {
+        if (fitAddon) requestAnimationFrame(() => fitAddon.fit());
+    }
+
+    function connectWs(sessionId) {
+        if (ws) { ws.close(); ws = null; }
+
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${sessionId}`);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            updateStatus(true);
+            reconnectDelay = 1000;
+            term.reset();
+            fitAddon.fit();
+            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+            document.getElementById('toolbar').classList.remove('pinned');
+            term.focus();
+        };
+
+        ws.onmessage = (e) => {
+            if (e.data instanceof ArrayBuffer) {
+                term.write(new Uint8Array(e.data));
+            } else {
+                term.write(e.data);
+            }
+        };
+
+        ws.onclose = () => { updateStatus(false); scheduleReconnect(sessionId); };
+        ws.onerror = () => { updateStatus(false); };
+    }
+
+    function scheduleReconnect(sessionId) {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        if (sessionId !== currentSession) return;
+        reconnectTimer = setTimeout(() => {
+            if (currentSession === sessionId) connectWs(sessionId);
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+    }
+
+    // --- Sessions ---
+
+    async function loadSessions() {
+        try {
+            const res = await fetch(`${API}/health`);
+            const data = await res.json();
+            const select = document.getElementById('sessionSelect');
+            const prev = select.value;
+
+            select.innerHTML = '';
+            if (data.sessions.length === 0) {
+                select.innerHTML = '<option value="">-- нет сессий --</option>';
+                currentSession = null;
+                if (ws) { ws.close(); ws = null; }
+                updateStatus(false);
+                return;
+            }
+
+            data.sessions.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s; opt.textContent = s;
+                select.appendChild(opt);
+            });
+
+            select.value = (prev && data.sessions.includes(prev)) ? prev : data.sessions[0];
+
+            if (currentSession !== select.value) {
+                currentSession = select.value;
+                initTerminal();
+                connectWs(currentSession);
+            }
+        } catch { updateStatus(false); }
+    }
+
+    async function createSession() {
+        const id = document.getElementById('newSessionId').value.trim();
+        const workdir = document.getElementById('newWorkdir').value.trim();
+        const cli = document.getElementById('newCli').value;
+        if (!id) return alert('Введите ID сессии');
+
+        closeCreateModal();
+        initTerminal();
+        term.clear();
+        term.write(`\r\n  Создаю сессию "${id}"... Запускаю ${cli}...\r\n`);
+
+        const res = await fetch(`${API}/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: id, workdir, cli }),
+        });
+        if (!res.ok) {
+            let detail = 'Ошибка создания сессии';
+            try { const d = await res.json(); detail = d.detail || detail; } catch {}
+            term.write(`\r\n  \x1b[31m${detail}\x1b[0m\r\n`);
+            return;
+        }
+
+        await loadSessions();
+        document.getElementById('sessionSelect').value = id;
+        currentSession = id;
+        connectWs(id);
+    }
+
+    async function deleteSession() {
+        if (!currentSession) return;
+        if (!confirm(`Удалить сессию "${currentSession}"?`)) return;
+        if (ws) { ws.close(); ws = null; }
+        await fetch(`${API}/sessions/${currentSession}`, { method: 'DELETE' });
+        currentSession = null;
+        await loadSessions();
+    }
+
+    document.getElementById('sessionSelect').addEventListener('change', function () {
+        if (this.value && this.value !== currentSession) {
+            currentSession = this.value;
+            initTerminal();
+            connectWs(currentSession);
+        }
+    });
+
+    // --- Mic (ASR) ---
+
+    let mediaRecorder = null;
+    let isRecording = false;
+    let recordingTimer = null;
+    let recordingSeconds = 0;
+    let pendingChunks = [];
+
+    function encodeWav(samples, sampleRate) {
+        const buffer = new ArrayBuffer(44 + samples.length * 2);
+        const view = new DataView(buffer);
+        function writeStr(offset, str) {
+            for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+        }
+        writeStr(0, 'RIFF');
+        view.setUint32(4, 36 + samples.length * 2, true);
+        writeStr(8, 'WAVE');
+        writeStr(12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeStr(36, 'data');
+        view.setUint32(40, samples.length * 2, true);
+        for (let i = 0; i < samples.length; i++) {
+            const s = Math.max(-1, Math.min(1, samples[i]));
+            view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        }
+        return new Blob([buffer], { type: 'audio/wav' });
+    }
+
+    async function webmToWav(webmBlob) {
+        const arrayBuffer = await webmBlob.arrayBuffer();
+        const audioCtx = new AudioContext();
+        const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        const samples = decoded.getChannelData(0);
+        audioCtx.close();
+        return encodeWav(samples, decoded.sampleRate);
+    }
+
+    async function sendChunksToASR(chunks, mimeType) {
+        if (chunks.length === 0) return '';
+        let blob = new Blob(chunks, { type: mimeType });
+        if (mimeType.includes('webm') || mimeType.includes('opus')) {
+            blob = await webmToWav(blob);
+        }
+        const formData = new FormData();
+        formData.append('audio', blob, 'recording.wav');
+        const res = await fetch(`${API}/asr`, { method: 'POST', body: formData });
+        const data = await res.json();
+        return data.text || '';
+    }
+
+    function showTranscript(text) {
+        const bar = document.getElementById('transcriptBar');
+        const textarea = document.getElementById('transcriptText');
+        bar.classList.remove('hidden');
+        textarea.value = text;
+        textarea.scrollTop = textarea.scrollHeight;
+        refitTerminal();
+    }
+
+    function appendTranscript(text) {
+        if (!text) return;
+        const textarea = document.getElementById('transcriptText');
+        document.getElementById('transcriptBar').classList.remove('hidden');
+        textarea.value = textarea.value ? textarea.value + ' ' + text : text;
+        textarea.scrollTop = textarea.scrollHeight;
+        refitTerminal();
+    }
+
+    async function sendTranscript() {
+        const textarea = document.getElementById('transcriptText');
+        const text = textarea.value.trim();
+        if (!text || !currentSession) return;
+
+        const micStatus = document.getElementById('micStatus');
+        try {
+            const res = await fetch(`${API}/sessions/${currentSession}/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text }),
+            });
+            if (!res.ok) {
+                let detail = 'Не удалось отправить';
+                try { const d = await res.json(); detail = d.detail || detail; } catch {}
+                micStatus.textContent = detail;
+                return;
+            }
+            micStatus.textContent = 'Отправлено!';
+            cancelTranscript();
+            setTimeout(() => { micStatus.textContent = 'Нажмите для голосового ввода'; }, 2000);
+        } catch (err) {
+            micStatus.textContent = 'Ошибка отправки';
+        }
+    }
+
+    function cancelTranscript() {
+        document.getElementById('transcriptBar').classList.add('hidden');
+        document.getElementById('transcriptText').value = '';
+        refitTerminal();
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.target.id === 'transcriptText' && e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendTranscript();
+        }
+    });
+
+    async function toggleMic() {
+        const micBtn = document.getElementById('micBtn');
+        const micStatus = document.getElementById('micStatus');
+        const spinner = document.getElementById('asrSpinner');
+
+        if (isRecording) { mediaRecorder.stop(); return; }
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', ''];
+            let chosenMime = '';
+            for (const mt of mimeTypes) {
+                if (!mt || (typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported(mt))) {
+                    chosenMime = mt; break;
+                }
+            }
+            mediaRecorder = chosenMime ? new MediaRecorder(stream, { mimeType: chosenMime }) : new MediaRecorder(stream);
+            pendingChunks = [];
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) pendingChunks.push(e.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                isRecording = false;
+                clearInterval(recordingTimer);
+                recordingSeconds = 0;
+                micBtn.classList.remove('recording', 'bg-accent', 'border-accent');
+                stream.getTracks().forEach(t => t.stop());
+
+                if (pendingChunks.length > 0) {
+                    const allChunks = [...pendingChunks];
+                    pendingChunks = [];
+                    spinner.classList.remove('hidden');
+                    micStatus.textContent = 'Распознаю...';
+                    try {
+                        const text = await sendChunksToASR(allChunks, mediaRecorder.mimeType || 'audio/webm');
+                        appendTranscript(text);
+                    } catch (err) {
+                        micStatus.textContent = `Ошибка ASR: ${err.message}`;
+                    }
+                    spinner.classList.add('hidden');
+                }
+
+                const textarea = document.getElementById('transcriptText');
+                if (textarea.value.trim()) {
+                    micStatus.textContent = 'Проверьте текст и нажмите ⏎';
+                    textarea.focus();
+                } else {
+                    micStatus.textContent = 'Речь не распознана';
+                    setTimeout(() => { micStatus.textContent = 'Нажмите для голосового ввода'; }, 3000);
+                }
+            };
+
+            mediaRecorder.start();
+            isRecording = true;
+            recordingSeconds = 0;
+            micBtn.classList.add('recording', 'bg-accent', 'border-accent');
+            micStatus.textContent = 'Запись 0:00 — говорите...';
+            cancelTranscript();
+
+            recordingTimer = setInterval(() => {
+                recordingSeconds++;
+                const m = Math.floor(recordingSeconds / 60);
+                const s = String(recordingSeconds % 60).padStart(2, '0');
+                micStatus.textContent = `Запись ${m}:${s} — говорите...`;
+            }, 1000);
+
+        } catch { alert('Нет доступа к микрофону'); }
+    }
+
+    // --- UI helpers ---
+
+    function updateStatus(ok) {
+        document.getElementById('statusDot').className = ok
+            ? 'w-2 h-2 rounded-full bg-ok shrink-0'
+            : 'w-2 h-2 rounded-full bg-accent shrink-0';
+    }
+
+    function openCreateModal() {
+        document.getElementById('createModal').classList.remove('hidden');
+        document.getElementById('createModal').classList.add('flex');
+        document.getElementById('newSessionId').focus();
+    }
+
+    function closeCreateModal() {
+        document.getElementById('createModal').classList.add('hidden');
+        document.getElementById('createModal').classList.remove('flex');
+    }
+
+    // --- Init ---
+    loadSessions();
+    setInterval(loadSessions, 10000);
+</script>
+</body>
+</html>

@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Agent Mobile</title>
+    <style>
+        :root {
+            --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333; --border: #2d333b;
+            --text: #e6edf3; --dim: #8b949e; --accent: #e94560; --ok: #4ecca3;
+            --red: #ff7b72; --green: #3fb950; --yellow: #d29922; --blue: #58a6ff;
+            --magenta: #bc8cff; --cyan: #39c5cf;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; }
+        body {
+            display: flex; flex-direction: column;
+            height: 100dvh;
+        }
+
+        /* --- Header --- */
+        .header {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 12px; background: var(--bg2);
+            border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .header select, .header button {
+            font-size: 14px; padding: 6px 10px; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--bg3); color: var(--text);
+            outline: none; -webkit-appearance: none;
+        }
+        .header button { background: var(--accent); border-color: var(--accent); font-weight: 600; }
+        .header button.secondary { background: var(--bg3); border-color: var(--border); font-weight: 400; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+        .status-dot.on { background: var(--ok); }
+
+        /* --- Terminal output --- */
+        .terminal-scroll {
+            flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+            padding: 8px 10px; font-family: 'Menlo', 'Courier New', monospace;
+            font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+            background: var(--bg);
+        }
+
+        /* ANSI styles */
+        .a-b { font-weight: 700; }
+        .a-dim { opacity: 0.6; }
+        .a-i { font-style: italic; }
+        .a-u { text-decoration: underline; }
+        .a-s { text-decoration: line-through; }
+        /* Foreground */
+        .a-30 { color: #484f58; } .a-31 { color: var(--red); } .a-32 { color: var(--green); }
+        .a-33 { color: var(--yellow); } .a-34 { color: var(--blue); } .a-35 { color: var(--magenta); }
+        .a-36 { color: var(--cyan); } .a-37 { color: #b1bac4; }
+        /* Bright foreground */
+        .a-90 { color: #6e7681; } .a-91 { color: #ffa198; } .a-92 { color: #56d364; }
+        .a-93 { color: #e3b341; } .a-94 { color: #79c0ff; } .a-95 { color: #d2a8ff; }
+        .a-96 { color: #56d4dd; } .a-97 { color: #ffffff; }
+        /* Background */
+        .a-bg40 { background: #484f58; } .a-bg41 { background: #5a1d28; }
+        .a-bg42 { background: #1b4721; } .a-bg43 { background: #3d2e00; }
+        .a-bg44 { background: #0c2d6b; } .a-bg45 { background: #3c1e70; }
+        .a-bg46 { background: #0e3a3e; } .a-bg47 { background: #3b434b; }
+        /* Bright background */
+        .a-bg100 { background: #6e7681; } .a-bg101 { background: #8e3b46; }
+        .a-bg102 { background: #2ea043; } .a-bg103 { background: #845d1a; }
+        .a-bg104 { background: #1f6feb; } .a-bg105 { background: #8957e5; }
+        .a-bg106 { background: #39c5cf; } .a-bg107 { background: #b1bac4; }
+
+        /* --- Input area --- */
+        .input-area {
+            flex-shrink: 0; background: var(--bg2);
+            border-top: 1px solid var(--border);
+            padding: 8px 10px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+        }
+        .input-row { display: flex; gap: 8px; align-items: flex-end; }
+        .input-area textarea {
+            flex: 1; background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+            border-radius: 12px; padding: 10px 12px; font-size: 15px; font-family: inherit;
+            resize: none; outline: none; min-height: 44px; max-height: 120px;
+            line-height: 1.4;
+        }
+        .input-area textarea:focus { border-color: var(--accent); }
+        .input-area textarea.has-voice { border-color: var(--ok); }
+
+        .input-btn {
+            width: 44px; height: 44px; border-radius: 50%; border: none;
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; cursor: pointer; transition: transform .1s, opacity .1s;
+        }
+        .input-btn:active { transform: scale(0.9); opacity: 0.8; }
+        .input-btn svg { width: 22px; height: 22px; }
+
+        .btn-mic { background: var(--bg3); border: 2px solid var(--blue); }
+        .btn-mic svg { fill: var(--blue); }
+        .btn-mic.recording { background: var(--accent); border-color: var(--accent); animation: pulse 1.5s infinite; }
+        .btn-mic.recording svg { fill: #fff; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+        .btn-clear { background: var(--bg3); border: 2px solid var(--dim); }
+        .btn-clear svg { stroke: var(--dim); }
+
+        .btn-send { background: var(--ok); border: 2px solid var(--ok); }
+        .btn-send svg { fill: var(--bg); }
+
+        .mic-status {
+            font-size: 12px; color: var(--dim); padding: 4px 0 2px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+    <div class="status-dot" id="statusDot"></div>
+    <select id="sessionSelect"><option value="">-- нет сессий --</option></select>
+    <button onclick="openCreate()">+</button>
+    <button class="secondary" onclick="deleteSession()">Del</button>
+    <button class="secondary" onclick="scrollToBottom()">&#8595;</button>
+</div>
+
+<!-- Terminal output (scrollable) -->
+<div class="terminal-scroll" id="output"></div>
+
+<!-- Input area -->
+<div class="input-area">
+    <div class="mic-status" id="micStatus"></div>
+    <div class="input-row">
+        <button class="input-btn btn-mic" id="micBtn" onclick="toggleMic()">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+            </svg>
+        </button>
+        <textarea id="inputText" rows="1" placeholder="Введите или надиктуйте текст..." enterkeyhint="send"></textarea>
+        <button class="input-btn btn-clear" id="btnClear" onclick="clearInput()" style="display:none;">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" xmlns="http://www.w3.org/2000/svg">
+                <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+            </svg>
+        </button>
+        <button class="input-btn btn-send" onclick="sendInput()">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/>
+            </svg>
+        </button>
+    </div>
+</div>
+
+<!-- Create session (inline, not modal) -->
+<div id="createPanel" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:50; display:none; align-items:center; justify-content:center;">
+    <div style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:20px; width:90%; max-width:360px;">
+        <div style="font-size:15px; font-weight:600; color:var(--accent); margin-bottom:12px;">Новая сессия</div>
+        <input id="cSessionId" placeholder="ID сессии" style="width:100%; padding:8px 10px; margin-bottom:8px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:14px; outline:none;">
+        <input id="cWorkdir" value="/workspace" style="width:100%; padding:8px 10px; margin-bottom:8px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:14px; outline:none;">
+        <select id="cCli" style="width:100%; padding:8px 10px; margin-bottom:12px; background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:14px; outline:none;">
+            <option value="claude" selected>Claude</option>
+            <option value="gemini">Gemini</option>
+            <option value="codex">Codex</option>
+            <option value="qwen">Qwen</option>
+        </select>
+        <div style="display:flex; gap:8px;">
+            <button onclick="closeCreate()" style="flex:1; padding:10px; border-radius:6px; background:var(--bg3); border:1px solid var(--border); color:var(--text); font-size:14px;">Отмена</button>
+            <button onclick="doCreate()" style="flex:1; padding:10px; border-radius:6px; background:var(--accent); border:none; color:white; font-size:14px; font-weight:600;">Создать</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const API = '';
+let currentSession = null;
+let pollTimer = null;
+let lastOutput = '';
+let autoScroll = true;
+
+const outputEl = document.getElementById('output');
+const inputEl = document.getElementById('inputText');
+const selectEl = document.getElementById('sessionSelect');
+
+// --- ANSI to HTML (full parser) ---
+function ansiToHtml(text) {
+    // Escape HTML
+    let s = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Strip non-SGR sequences
+    s = s.replace(/\x1b\[\?[0-9;]*[a-zA-Z]/g, '');       // private modes
+    s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ''); // OSC
+    s = s.replace(/\x1b\[[0-9;]*[A-HJKSTf]/g, '');        // cursor movement etc
+
+    // Parse SGR (color/style) sequences
+    let openSpans = 0;
+    s = s.replace(/\x1b\[([0-9;]*)m/g, (_, params) => {
+        const codes = params ? params.split(';').map(Number) : [0];
+        let classes = [];
+        let styles = [];
+        let close = false;
+
+        for (let i = 0; i < codes.length; i++) {
+            const c = codes[i];
+            if (c === 0) { close = true; continue; }
+            if (c === 1) classes.push('a-b');
+            else if (c === 2) classes.push('a-dim');
+            else if (c === 3) classes.push('a-i');
+            else if (c === 4) classes.push('a-u');
+            else if (c === 9) classes.push('a-s');
+            else if (c >= 30 && c <= 37) classes.push(`a-${c}`);
+            else if (c >= 40 && c <= 47) classes.push(`a-bg${c}`);
+            else if (c >= 90 && c <= 97) classes.push(`a-${c}`);
+            else if (c >= 100 && c <= 107) classes.push(`a-bg${c}`);
+            // 256 color: 38;5;N
+            else if (c === 38 && codes[i+1] === 5 && codes[i+2] !== undefined) {
+                styles.push(`color:${ansi256(codes[i+2])}`);
+                i += 2;
+            }
+            // 256 color bg: 48;5;N
+            else if (c === 48 && codes[i+1] === 5 && codes[i+2] !== undefined) {
+                styles.push(`background:${ansi256(codes[i+2])}`);
+                i += 2;
+            }
+            // RGB: 38;2;R;G;B
+            else if (c === 38 && codes[i+1] === 2 && codes.length > i+4) {
+                styles.push(`color:rgb(${codes[i+2]},${codes[i+3]},${codes[i+4]})`);
+                i += 4;
+            }
+            // RGB bg: 48;2;R;G;B
+            else if (c === 48 && codes[i+1] === 2 && codes.length > i+4) {
+                styles.push(`background:rgb(${codes[i+2]},${codes[i+3]},${codes[i+4]})`);
+                i += 4;
+            }
+        }
+
+        let result = '';
+        if (close) {
+            // Close all open spans
+            result += '</span>'.repeat(openSpans);
+            openSpans = 0;
+        }
+        if (classes.length || styles.length) {
+            let tag = '<span';
+            if (classes.length) tag += ` class="${classes.join(' ')}"`;
+            if (styles.length) tag += ` style="${styles.join(';')}"`;
+            tag += '>';
+            result += tag;
+            openSpans++;
+        }
+        return result;
+    });
+
+    // Strip any remaining escape sequences
+    s = s.replace(/\x1b[^\x1b]{0,8}/g, '');
+    // Close unclosed spans
+    s += '</span>'.repeat(openSpans);
+    return s;
+}
+
+// 256-color palette
+function ansi256(n) {
+    // Standard 16
+    const base = [
+        '#484f58','#ff7b72','#3fb950','#d29922','#58a6ff','#bc8cff','#39c5cf','#b1bac4',
+        '#6e7681','#ffa198','#56d364','#e3b341','#79c0ff','#d2a8ff','#56d4dd','#ffffff'
+    ];
+    if (n < 16) return base[n];
+    if (n >= 232) { const g = 8 + (n - 232) * 10; return `rgb(${g},${g},${g})`; }
+    // 6x6x6 cube (16-231)
+    const idx = n - 16;
+    const r = Math.floor(idx / 36), g = Math.floor((idx % 36) / 6), b = idx % 6;
+    const val = c => c ? 55 + c * 40 : 0;
+    return `rgb(${val(r)},${val(g)},${val(b)})`;
+}
+
+// --- Terminal output polling ---
+async function pollOutput() {
+    if (!currentSession) return;
+    try {
+        const res = await fetch(`${API}/sessions/${currentSession}/tail?full=true`);
+        const data = await res.json();
+        const raw = data.output || '';
+        if (raw !== lastOutput) {
+            lastOutput = raw;
+            outputEl.innerHTML = ansiToHtml(raw);
+            if (autoScroll) scrollToBottom();
+        }
+        document.getElementById('statusDot').classList.add('on');
+    } catch {
+        document.getElementById('statusDot').classList.remove('on');
+    }
+}
+
+function startPolling() {
+    stopPolling();
+    pollOutput();
+    pollTimer = setInterval(pollOutput, 1000);
+}
+
+function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function scrollToBottom() {
+    outputEl.scrollTop = outputEl.scrollHeight;
+}
+
+// Track if user scrolled up manually
+outputEl.addEventListener('scroll', () => {
+    const atBottom = outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 30;
+    autoScroll = atBottom;
+});
+
+// --- Sessions ---
+async function loadSessions() {
+    try {
+        const res = await fetch(`${API}/health`);
+        const data = await res.json();
+        const prev = selectEl.value;
+
+        selectEl.innerHTML = '';
+        if (data.sessions.length === 0) {
+            selectEl.innerHTML = '<option value="">-- нет сессий --</option>';
+            currentSession = null;
+            stopPolling();
+            return;
+        }
+
+        data.sessions.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s; opt.textContent = s;
+            selectEl.appendChild(opt);
+        });
+
+        selectEl.value = (prev && data.sessions.includes(prev)) ? prev : data.sessions[0];
+
+        if (currentSession !== selectEl.value) {
+            currentSession = selectEl.value;
+            lastOutput = '';
+            startPolling();
+        }
+    } catch {}
+}
+
+selectEl.addEventListener('change', function() {
+    if (this.value && this.value !== currentSession) {
+        currentSession = this.value;
+        lastOutput = '';
+        outputEl.innerHTML = '';
+        autoScroll = true;
+        startPolling();
+    }
+});
+
+async function deleteSession() {
+    if (!currentSession) return;
+    if (!confirm(`Удалить "${currentSession}"?`)) return;
+    stopPolling();
+    await fetch(`${API}/sessions/${currentSession}`, { method: 'DELETE' });
+    currentSession = null;
+    outputEl.innerHTML = '';
+    await loadSessions();
+}
+
+// --- Create session ---
+function openCreate() {
+    const p = document.getElementById('createPanel');
+    p.style.display = 'flex';
+}
+function closeCreate() {
+    document.getElementById('createPanel').style.display = 'none';
+}
+async function doCreate() {
+    const id = document.getElementById('cSessionId').value.trim();
+    const workdir = document.getElementById('cWorkdir').value.trim();
+    const cli = document.getElementById('cCli').value;
+    if (!id) return;
+    closeCreate();
+    outputEl.innerHTML = `<span class="ansi-dim">Создаю сессию "${id}"...</span>`;
+
+    const res = await fetch(`${API}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: id, workdir, cli }),
+    });
+    if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        outputEl.innerHTML = `<span class="ansi-red">${d.detail || 'Ошибка'}</span>`;
+        return;
+    }
+    currentSession = id;
+    lastOutput = '';
+    autoScroll = true;
+    await loadSessions();
+    selectEl.value = id;
+    startPolling();
+}
+
+// --- Send text input ---
+async function sendInput() {
+    const text = inputEl.value.trim();
+    if (!text || !currentSession) return;
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    inputEl.classList.remove('has-voice');
+    autoScroll = true;
+
+    await fetch(`${API}/sessions/${currentSession}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+    });
+    // Immediately poll to show the sent command
+    setTimeout(pollOutput, 300);
+}
+
+function clearInput() {
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    inputEl.classList.remove('has-voice');
+    document.getElementById('btnClear').style.display = 'none';
+    inputEl.focus();
+}
+
+function updateClearBtn() {
+    document.getElementById('btnClear').style.display = inputEl.value.trim() ? 'flex' : 'none';
+}
+
+// Auto-resize input textarea
+inputEl.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+    updateClearBtn();
+});
+
+// Enter to send (without Shift)
+inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendInput();
+    }
+});
+
+// --- Voice (ASR) ---
+let mediaRecorder = null;
+let isRecording = false;
+let recTimer = null;
+let recSec = 0;
+let pendingChunks = [];
+
+function encodeWav(samples, sampleRate) {
+    const buf = new ArrayBuffer(44 + samples.length * 2);
+    const v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0,'RIFF'); v.setUint32(4, 36 + samples.length*2, true);
+    w(8,'WAVE'); w(12,'fmt '); v.setUint32(16,16,true);
+    v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,sampleRate,true); v.setUint32(28,sampleRate*2,true);
+    v.setUint16(32,2,true); v.setUint16(34,16,true);
+    w(36,'data'); v.setUint32(40,samples.length*2,true);
+    for (let i = 0; i < samples.length; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
+    }
+    return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function webmToWav(blob) {
+    const ab = await blob.arrayBuffer();
+    const ctx = new AudioContext();
+    const dec = await ctx.decodeAudioData(ab);
+    const samples = dec.getChannelData(0);
+    ctx.close();
+    return encodeWav(samples, dec.sampleRate);
+}
+
+function appendToInput(text) {
+    if (!text) return;
+    if (inputEl.value) {
+        inputEl.value += ' ' + text;
+    } else {
+        inputEl.value = text;
+    }
+    inputEl.classList.add('has-voice');
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    updateClearBtn();
+    inputEl.focus();
+}
+
+async function toggleMic() {
+    const btn = document.getElementById('micBtn');
+    const status = document.getElementById('micStatus');
+
+    if (isRecording) { mediaRecorder.stop(); return; }
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', ''];
+        let mime = '';
+        for (const t of types) {
+            if (!t || MediaRecorder.isTypeSupported?.(t)) { mime = t; break; }
+        }
+        mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+        pendingChunks = [];
+
+        mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) pendingChunks.push(e.data); };
+
+        mediaRecorder.onstop = async () => {
+            isRecording = false;
+            clearInterval(recTimer); recSec = 0;
+            btn.classList.remove('recording');
+            stream.getTracks().forEach(t => t.stop());
+
+            if (pendingChunks.length > 0) {
+                const chunks = [...pendingChunks]; pendingChunks = [];
+                status.textContent = 'Распознаю...';
+                try {
+                    let blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+                    const mt = mediaRecorder.mimeType || '';
+                    if (mt.includes('webm') || mt.includes('opus')) blob = await webmToWav(blob);
+                    const fd = new FormData();
+                    fd.append('audio', blob, 'recording.wav');
+                    const res = await fetch(`${API}/asr`, { method: 'POST', body: fd });
+                    const data = await res.json();
+                    if (data.text) {
+                        appendToInput(data.text);
+                        status.textContent = 'Проверьте и отправьте';
+                    } else {
+                        status.textContent = 'Речь не распознана';
+                    }
+                } catch (err) {
+                    status.textContent = 'Ошибка ASR';
+                }
+            }
+            setTimeout(() => { status.textContent = ''; }, 4000);
+        };
+
+        mediaRecorder.start();
+        isRecording = true; recSec = 0;
+        btn.classList.add('recording');
+        status.textContent = '0:00 — говорите...';
+        recTimer = setInterval(() => {
+            recSec++;
+            status.textContent = `${Math.floor(recSec/60)}:${String(recSec%60).padStart(2,'0')} — говорите...`;
+        }, 1000);
+    } catch { alert('Нет доступа к микрофону'); }
+}
+
+// --- Init ---
+loadSessions();
+setInterval(loadSessions, 15000);
+</script>
+</body>
+</html>
